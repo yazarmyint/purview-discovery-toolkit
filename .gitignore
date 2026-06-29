@@ -1,0 +1,38 @@
+# ===========================================================================
+# Toolkit output — NEVER COMMIT
+# These folders and files contain discovered tenant configuration and, in
+# -Detailed / audit modes, item-level metadata (file names, UPNs, site URLs).
+# Default output goes to C:\PurviewDiscovery (outside the repo); this is a
+# backstop for when -OutputRoot is redirected into the repo or a test/mock
+# harness runs in-tree.
+# ===========================================================================
+
+# Per-run output folders (matched at any depth)
+SourceDiscovery-*/
+ContentInventory-*/
+AuditSample-*/
+Comparison-*/
+
+# Output file types produced by the toolkit (safety net).
+# The repo itself is .ps1 + .md + LICENSE, so these don't touch tracked source.
+*.csv
+*.json
+*.clixml
+*.html
+*.zip
+*.log
+
+# To intentionally ship a SYNTHETIC sample artifact (never one with real data),
+# force-add it past these rules:
+#   git add -f examples/sample-report.html
+# ...or add a scoped negation, e.g.:
+#   !examples/*.html
+
+# ===========================================================================
+# OS / editor noise
+# ===========================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+*~
