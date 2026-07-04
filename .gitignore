@@ -11,7 +11,6 @@
 SourceDiscovery-*/
 ContentInventory-*/
 AuditSample-*/
-Comparison-*/
 
 # Output file types produced by the toolkit (safety net).
 # The repo itself is .ps1 + .md + LICENSE, so these don't touch tracked source.

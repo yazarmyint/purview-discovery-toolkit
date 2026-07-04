@@ -2,27 +2,19 @@
 <#
 .SYNOPSIS
     Generates a client-ready, self-contained HTML report from the Purview discovery
-    toolkit output. Two modes:
-      -ReportType Baseline    : reads a SourceDiscovery-* run folder -> source baseline report
-      -ReportType Comparison  : reads a Comparison-* folder (or _MigrationMappingWorkbook.csv)
-                                -> source-to-target migration report
+    toolkit output. Reads a SourceDiscovery-* run folder and renders an
+    information-protection discovery baseline report.
 
     The report is fully offline (inline CSS + inline SVG charts, no CDN / internet),
     print-to-PDF friendly, with an executive summary at the top and technical detail below.
 
 .EXAMPLE
-    .\New-PurviewReport.ps1 -ReportType Baseline `
+    .\New-PurviewReport.ps1 `
         -Path C:\PurviewDiscovery\SourceDiscovery-20260628-101500 `
-        -ClientName "Contoso Ltd" -PreparedBy "Acme Advisory" -Classification "Confidential"
-
-.EXAMPLE
-    .\New-PurviewReport.ps1 -ReportType Comparison `
-        -Path C:\PurviewDiscovery\Comparison-20260901-090000 `
-        -ClientName "Contoso Ltd" -PreparedBy "Acme Advisory"
+        -OrganizationName "Contoso Ltd" -PreparedBy "Acme Advisory" -Classification "Confidential"
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Baseline','Comparison')][string]$ReportType,
     [Parameter(Mandatory)][string]$Path,
     [string]$OutputPath,
     [string]$OrganizationName = 'Your Organization',
@@ -43,7 +35,6 @@ function Test-True($v){ ($v -is [bool] -and $v) -or ("$v" -match '^(?i)\s*true\s
 function Get-Csv([string]$p){ if(Test-Path $p){ @(Import-Csv $p) } else { @() } }
 
 $Palette = @{
-    Match='#2e7d32'; Changed='#c47d00'; OnlyInSource='#b10e1c'; OnlyInTarget='#1565c0'
     Priority='#b10e1c'; Improvement='#c47d00'; Healthy='#107c10'; Info='#5b6b7b'; Accent='#0f6cbd'
 }
 $SevLabel = @{ Priority='Priority'; Improvement='Needs improvement'; Healthy='Healthy'; Info='Informational' }
@@ -128,157 +119,101 @@ function Add-Obs($Severity,$Area,$Title,$Detail,$Recommendation){
 
 $kpiHtml=''; $chartHtml=''; $detailHtml=''; $narrative=''; $subtitle=''
 
-if($ReportType -eq 'Baseline'){
-    $subtitle = 'Source Tenant Information-Protection Baseline'
-    $labels   = Get-Csv (Join-Path $Path '1-InformationProtection\SensitivityLabels.csv')
-    $labelPol = Get-Csv (Join-Path $Path '1-InformationProtection\LabelPolicies.csv')
-    $autoPol  = Get-Csv (Join-Path $Path '1-InformationProtection\AutoLabelPolicies.csv')
-    $sits     = Get-Csv (Join-Path $Path '2-Classification\SensitiveInfoTypes_All.csv')
-    $dlp      = Get-Csv (Join-Path $Path '3-DLP\DlpPolicies.csv')
-    $dlpRules = Get-Csv (Join-Path $Path '3-DLP\DlpRules.csv')
-    $retLab   = Get-Csv (Join-Path $Path '4-Retention-Records\RetentionLabels.csv')
-    $retPol   = Get-Csv (Join-Path $Path '4-Retention-Records\RetentionPolicies.csv')
-    $auditIng = Get-Csv (Join-Path $Path '5-Audit\UnifiedAuditIngestionStatus.csv')
-    $auditRet = Get-Csv (Join-Path $Path '5-Audit\AuditLogRetentionPolicies.csv')
-    $manifest = Get-Csv (Join-Path $Path '_manifest.csv')
+$subtitle = 'Information-Protection Discovery Baseline'
+$labels   = Get-Csv (Join-Path $Path '1-InformationProtection\SensitivityLabels.csv')
+$labelPol = Get-Csv (Join-Path $Path '1-InformationProtection\LabelPolicies.csv')
+$autoPol  = Get-Csv (Join-Path $Path '1-InformationProtection\AutoLabelPolicies.csv')
+$sits     = Get-Csv (Join-Path $Path '2-Classification\SensitiveInfoTypes_All.csv')
+$dlp      = Get-Csv (Join-Path $Path '3-DLP\DlpPolicies.csv')
+$dlpRules = Get-Csv (Join-Path $Path '3-DLP\DlpRules.csv')
+$retLab   = Get-Csv (Join-Path $Path '4-Retention-Records\RetentionLabels.csv')
+$retPol   = Get-Csv (Join-Path $Path '4-Retention-Records\RetentionPolicies.csv')
+$auditIng = Get-Csv (Join-Path $Path '5-Audit\UnifiedAuditIngestionStatus.csv')
+$auditRet = Get-Csv (Join-Path $Path '5-Audit\AuditLogRetentionPolicies.csv')
+$manifest = Get-Csv (Join-Path $Path '_manifest.csv')
 
-    $lblTotal  = $labels.Count
-    $lblEnc    = @($labels | Where-Object { Test-True $_.EncryptionEnabled }).Count
-    $lblParent = @($labels | Where-Object { [string]::IsNullOrWhiteSpace($_.ParentLabel) }).Count
-    $sitCustom = @($sits   | Where-Object { Test-True $_.IsCustom }).Count
-    $dlpTotal  = $dlp.Count
-    $dlpEnf    = @($dlp | Where-Object { $_.Mode -eq 'Enable' }).Count
-    $dlpTest   = @($dlp | Where-Object { $_.Mode -like 'Test*' }).Count
-    $dlpDis    = @($dlp | Where-Object { $_.Mode -eq 'Disable' }).Count
-    $dlpBlk    = @($dlpRules | Where-Object { Test-True $_.BlockAccess }).Count
-    $dlpNoAlrt = @($dlpRules | Where-Object { -not (Test-True $_.GenerateAlert) }).Count
-    $retTotal  = $retLab.Count
-    $records   = @($retLab | Where-Object { Test-True $_.IsRecordLabel }).Count
-    $noFilePln = @($retLab | Where-Object { $_.FilePlan -eq 'no' }).Count
-    # Only judge audit ingestion if its export actually succeeded (else status is unknown, not "disabled").
-    $auditArtifact = @($manifest | Where-Object { $_.Artifact -eq 'UnifiedAuditIngestionStatus' })
-    $auditAssessed = ($auditArtifact.Count -gt 0) -and ($auditArtifact[0].Status -eq 'Success') -and ($auditIng.Count -gt 0)
-    $auditOn   = $auditAssessed -and (Test-True $auditIng[0].UnifiedAuditLogIngestionEnabled)
+$lblTotal  = $labels.Count
+$lblEnc    = @($labels | Where-Object { Test-True $_.EncryptionEnabled }).Count
+$lblParent = @($labels | Where-Object { [string]::IsNullOrWhiteSpace($_.ParentLabel) }).Count
+$sitCustom = @($sits   | Where-Object { Test-True $_.IsCustom }).Count
+$dlpTotal  = $dlp.Count
+$dlpEnf    = @($dlp | Where-Object { $_.Mode -eq 'Enable' }).Count
+$dlpTest   = @($dlp | Where-Object { $_.Mode -like 'Test*' }).Count
+$dlpDis    = @($dlp | Where-Object { $_.Mode -eq 'Disable' }).Count
+$dlpBlk    = @($dlpRules | Where-Object { Test-True $_.BlockAccess }).Count
+$dlpNoAlrt = @($dlpRules | Where-Object { -not (Test-True $_.GenerateAlert) }).Count
+$retTotal  = $retLab.Count
+$records   = @($retLab | Where-Object { Test-True $_.IsRecordLabel }).Count
+$noFilePln = @($retLab | Where-Object { $_.FilePlan -eq 'no' }).Count
+# Only judge audit ingestion if its export actually succeeded (else status is unknown, not "disabled").
+$auditArtifact = @($manifest | Where-Object { $_.Artifact -eq 'UnifiedAuditIngestionStatus' })
+$auditAssessed = ($auditArtifact.Count -gt 0) -and ($auditArtifact[0].Status -eq 'Success') -and ($auditIng.Count -gt 0)
+$auditOn   = $auditAssessed -and (Test-True $auditIng[0].UnifiedAuditLogIngestionEnabled)
 
-    # ---- Observations (the consulting interpretation) ----
-    if($lblTotal -gt 12){ Add-Obs 'Improvement' 'Information Protection' 'Sensitivity-label taxonomy is larger than a typical spine' "$lblTotal labels discovered (count includes sublabels); large taxonomies are harder to apply consistently." 'Consider consolidating to a small top-level spine with justified sublabels during target-state design.' }
-    elseif($lblTotal -eq 0){ Add-Obs 'Priority' 'Information Protection' 'No sensitivity labels are published' 'The source tenant has no sensitivity-label taxonomy to migrate.' 'Design a baseline label taxonomy as a net-new control in the destination tenant.' }
-    else { Add-Obs 'Healthy' 'Information Protection' 'Sensitivity-label taxonomy is within a manageable range' "$lblTotal labels discovered ($lblParent top-level)." $null }
-    if($lblTotal -gt 0 -and $lblEnc -eq 0){ Add-Obs 'Improvement' 'Information Protection' 'No labels apply encryption' 'No discovered label enforces label-based encryption / usage restriction.' 'Apply encryption to the top one or two tiers where confidentiality warrants it.' }
-    if($dlpTotal -gt 0 -and $dlpEnf -eq 0){ Add-Obs 'Priority' 'Data Loss Prevention' 'No DLP policy is in enforcement mode' "$dlpTotal DLP policies exist but none are set to enforce." 'Confirm which policies should move to enforce after a simulation/audit soak in the destination.' }
-    if($dlpTest -gt 0){ Add-Obs 'Improvement' 'Data Loss Prevention' 'DLP policies remain in test/simulation mode' "$dlpTest of $dlpTotal DLP policies are in a test mode." 'Decide per policy whether to promote to enforce or retire during rationalization.' }
-    if($dlpNoAlrt -gt 0){ Add-Obs 'Info' 'Data Loss Prevention' 'Some DLP rules do not generate alerts' "$dlpNoAlrt DLP rules have alerting disabled, weakening monitoring evidence." 'Standardise alerting on medium/high-severity rules to support SOC 2 / ISO monitoring evidence.' }
-    if($sitCustom -gt 0){ Add-Obs 'Info' 'Classification' 'Custom sensitive information types require rebuild & validation' "$sitCustom custom SITs discovered; custom classifiers and EDM schemas do not migrate one-for-one." 'Recreate and re-validate custom SITs in the destination; rebuild EDM and trainable classifiers as net-new.' }
-    if($noFilePln -gt 0){ Add-Obs 'Improvement' 'Retention & Records' 'Retention labels are not mapped to a file plan' "$noFilePln of $retTotal retention labels have no file-plan descriptors." 'Align retention labels to a legally approved records schedule before rebuild.' }
-    if($records -gt 0){ Add-Obs 'Info' 'Retention & Records' 'Record-type labels are immutable' "$records record/regulatory-record labels were found; these cannot be relabelled or deleted." 'Plan explicit handling of immutable records during cutover.' }
-    if(-not $auditAssessed){ Add-Obs 'Info' 'Audit' 'Audit ingestion status was not assessed' 'The audit export was missing, empty or failed in this run, so ingestion state could not be confirmed from the data.' 'Re-run discovery with audit permissions to confirm unified audit logging is enabled.' }
-    elseif(-not $auditOn){ Add-Obs 'Priority' 'Audit' 'Unified audit log ingestion is disabled' 'Audit ingestion is confirmed disabled in the source tenant.' 'Enable unified audit logging and extend retention to support evidence collection.' }
-    else { Add-Obs 'Healthy' 'Audit' 'Unified audit logging is enabled' 'Audit ingestion is active, supporting activity and override evidence.' $null }
-    if($auditRet.Count -eq 0){ Add-Obs 'Info' 'Audit' 'No custom audit-log retention policies' 'Only default audit retention is in effect.' 'Define audit-retention policies matching your SOC 2 observation window and ISO records retention.' }
+# ---- Observations (the assessment interpretation) ----
+if($lblTotal -gt 12){ Add-Obs 'Improvement' 'Information Protection' 'Sensitivity-label taxonomy is larger than a typical spine' "$lblTotal labels discovered (count includes sublabels); large taxonomies are harder to apply consistently." 'Consider consolidating to a small top-level spine with justified sublabels during rationalisation.' }
+elseif($lblTotal -eq 0){ Add-Obs 'Priority' 'Information Protection' 'No sensitivity labels are published' 'The tenant has no sensitivity-label taxonomy in place.' 'Design a baseline label taxonomy for the tenant.' }
+else { Add-Obs 'Healthy' 'Information Protection' 'Sensitivity-label taxonomy is within a manageable range' "$lblTotal labels discovered ($lblParent top-level)." $null }
+if($lblTotal -gt 0 -and $lblEnc -eq 0){ Add-Obs 'Improvement' 'Information Protection' 'No labels apply encryption' 'No discovered label enforces label-based encryption / usage restriction.' 'Apply encryption to the top one or two tiers where confidentiality warrants it.' }
+if($dlpTotal -gt 0 -and $dlpEnf -eq 0){ Add-Obs 'Priority' 'Data Loss Prevention' 'No DLP policy is in enforcement mode' "$dlpTotal DLP policies exist but none are set to enforce." 'Confirm which policies should move to enforce after a simulation/audit soak.' }
+if($dlpTest -gt 0){ Add-Obs 'Improvement' 'Data Loss Prevention' 'DLP policies remain in test/simulation mode' "$dlpTest of $dlpTotal DLP policies are in a test mode." 'Decide per policy whether to promote to enforce or retire during rationalization.' }
+if($dlpNoAlrt -gt 0){ Add-Obs 'Info' 'Data Loss Prevention' 'Some DLP rules do not generate alerts' "$dlpNoAlrt DLP rules have alerting disabled, weakening monitoring evidence." 'Standardise alerting on medium/high-severity rules to support SOC 2 / ISO monitoring evidence.' }
+if($sitCustom -gt 0){ Add-Obs 'Info' 'Classification' 'Custom sensitive information types require review & validation' "$sitCustom custom SITs discovered; their detection logic (regex/keywords, EDM, trainable classifiers) is tenant-specific." 'Review and validate custom SITs; note that EDM schemas and trainable classifiers are not fully exportable and should be documented separately.' }
+if($noFilePln -gt 0){ Add-Obs 'Improvement' 'Retention & Records' 'Retention labels are not mapped to a file plan' "$noFilePln of $retTotal retention labels have no file-plan descriptors." 'Align retention labels to a legally approved records schedule.' }
+if($records -gt 0){ Add-Obs 'Info' 'Retention & Records' 'Record-type labels are immutable' "$records record/regulatory-record labels were found; these cannot be relabelled or deleted." 'Plan explicit handling of immutable records.' }
+if(-not $auditAssessed){ Add-Obs 'Info' 'Audit' 'Audit ingestion status was not assessed' 'The audit export was missing, empty or failed in this run, so ingestion state could not be confirmed from the data.' 'Re-run discovery with audit permissions to confirm unified audit logging is enabled.' }
+elseif(-not $auditOn){ Add-Obs 'Priority' 'Audit' 'Unified audit log ingestion is disabled' 'Audit ingestion is confirmed disabled in the tenant.' 'Enable unified audit logging and extend retention to support evidence collection.' }
+else { Add-Obs 'Healthy' 'Audit' 'Unified audit logging is enabled' 'Audit ingestion is active, supporting activity and override evidence.' $null }
+if($auditRet.Count -eq 0){ Add-Obs 'Info' 'Audit' 'No custom audit-log retention policies' 'Only default audit retention is in effect.' 'Define audit-retention policies matching your SOC 2 observation window and ISO records retention.' }
 
-    $priCount = @($obs | Where-Object Severity -eq 'Priority').Count
-    $impCount = @($obs | Where-Object Severity -eq 'Improvement').Count
+$priCount = @($obs | Where-Object Severity -eq 'Priority').Count
+$impCount = @($obs | Where-Object Severity -eq 'Improvement').Count
 
-    $narrative = "This report presents the Microsoft Purview information-protection baseline discovered in the $(Enc $OrganizationName) source tenant. " +
-        "Discovery is read-only and forms the current-state input to the target-state rebuild. It identified <b>$lblTotal</b> sensitivity labels, " +
-        "<b>$dlpTotal</b> data loss prevention policies and <b>$retTotal</b> retention labels across the assessed control areas. " +
-        "<b>$($obs.Count)</b> observations were raised - <b>$priCount</b> priority and <b>$impCount</b> improvement items - to direct the consolidation and rebuild effort."
+$narrative = "This report presents the Microsoft Purview information-protection baseline discovered in the $(Enc $OrganizationName) tenant. " +
+    "Discovery is read-only and captures the tenant's current-state configuration. It identified <b>$lblTotal</b> sensitivity labels, " +
+    "<b>$dlpTotal</b> data loss prevention policies and <b>$retTotal</b> retention labels across the assessed control areas. " +
+    "<b>$($obs.Count)</b> observations were raised - <b>$priCount</b> priority and <b>$impCount</b> improvement items - to direct remediation and rationalisation."
 
-    $auditTxt = if(-not $auditAssessed){'Unknown'}elseif($auditOn){'Enabled'}else{'Disabled'}
-    $kpiHtml = (New-Kpi "$lblTotal" 'Sensitivity labels' "$lblEnc apply encryption" $Palette.Accent) +
-               (New-Kpi "$dlpTotal" 'DLP policies' "$dlpEnf enforce / $dlpTest test" $Palette.Accent) +
-               (New-Kpi "$retTotal" 'Retention labels' "$records record-type" $Palette.Accent) +
-               (New-Kpi "$sitCustom" 'Custom SITs' 'rebuild required' $Palette.Improvement) +
-               (New-Kpi "$($obs.Count)" 'Observations' "$priCount priority" ($(if($priCount){$Palette.Priority}else{$Palette.Healthy}))) +
-               (New-Kpi $auditTxt 'Audit ingestion' "$($auditRet.Count) retention policies" ($(if(-not $auditAssessed){$Palette.Info}elseif($auditOn){$Palette.Healthy}else{$Palette.Priority})))
+$auditTxt = if(-not $auditAssessed){'Unknown'}elseif($auditOn){'Enabled'}else{'Disabled'}
+$kpiHtml = (New-Kpi "$lblTotal" 'Sensitivity labels' "$lblEnc apply encryption" $Palette.Accent) +
+           (New-Kpi "$dlpTotal" 'DLP policies' "$dlpEnf enforce / $dlpTest test" $Palette.Accent) +
+           (New-Kpi "$retTotal" 'Retention labels' "$records record-type" $Palette.Accent) +
+           (New-Kpi "$sitCustom" 'Custom SITs' 'review required' $Palette.Improvement) +
+           (New-Kpi "$($obs.Count)" 'Observations' "$priCount priority" ($(if($priCount){$Palette.Priority}else{$Palette.Healthy}))) +
+           (New-Kpi $auditTxt 'Audit ingestion' "$($auditRet.Count) retention policies" ($(if(-not $auditAssessed){$Palette.Info}elseif($auditOn){$Palette.Healthy}else{$Palette.Priority})))
 
-    $donutDlp = New-Donut -CenterValue "$dlpTotal" -CenterLabel 'DLP policies' -Segments @(
-        [pscustomobject]@{Label='Enforce';Value=$dlpEnf;Color=$Palette.Healthy},
-        [pscustomobject]@{Label='Test';Value=$dlpTest;Color=$Palette.Improvement},
-        [pscustomobject]@{Label='Disabled';Value=$dlpDis;Color=$Palette.Info})
-    $donutLbl = New-Donut -CenterValue "$lblTotal" -CenterLabel 'labels' -Segments @(
-        [pscustomobject]@{Label='Encryption';Value=$lblEnc;Color=$Palette.Accent},
-        [pscustomobject]@{Label='No encryption';Value=($lblTotal-$lblEnc);Color=$Palette.Info})
-    $areaBars = New-Bars -Items @(
-        [pscustomobject]@{Label='Sensitivity labels';Value=$lblTotal},
-        [pscustomobject]@{Label='Label policies';Value=$labelPol.Count},
-        [pscustomobject]@{Label='Auto-label policies';Value=$autoPol.Count},
-        [pscustomobject]@{Label='Custom SITs';Value=$sitCustom},
-        [pscustomobject]@{Label='DLP policies';Value=$dlpTotal},
-        [pscustomobject]@{Label='DLP rules';Value=$dlpRules.Count},
-        [pscustomobject]@{Label='Retention labels';Value=$retTotal},
-        [pscustomobject]@{Label='Retention policies';Value=$retPol.Count})
-    $chartHtml = (New-ChartCard 'DLP enforcement posture' $donutDlp) +
-                 (New-ChartCard 'Label encryption coverage' $donutLbl) +
-                 (New-ChartCard 'Control inventory by type' $areaBars)
+$donutDlp = New-Donut -CenterValue "$dlpTotal" -CenterLabel 'DLP policies' -Segments @(
+    [pscustomobject]@{Label='Enforce';Value=$dlpEnf;Color=$Palette.Healthy},
+    [pscustomobject]@{Label='Test';Value=$dlpTest;Color=$Palette.Improvement},
+    [pscustomobject]@{Label='Disabled';Value=$dlpDis;Color=$Palette.Info})
+$donutLbl = New-Donut -CenterValue "$lblTotal" -CenterLabel 'labels' -Segments @(
+    [pscustomobject]@{Label='Encryption';Value=$lblEnc;Color=$Palette.Accent},
+    [pscustomobject]@{Label='No encryption';Value=($lblTotal-$lblEnc);Color=$Palette.Info})
+$areaBars = New-Bars -Items @(
+    [pscustomobject]@{Label='Sensitivity labels';Value=$lblTotal},
+    [pscustomobject]@{Label='Label policies';Value=$labelPol.Count},
+    [pscustomobject]@{Label='Auto-label policies';Value=$autoPol.Count},
+    [pscustomobject]@{Label='Custom SITs';Value=$sitCustom},
+    [pscustomobject]@{Label='DLP policies';Value=$dlpTotal},
+    [pscustomobject]@{Label='DLP rules';Value=$dlpRules.Count},
+    [pscustomobject]@{Label='Retention labels';Value=$retTotal},
+    [pscustomobject]@{Label='Retention policies';Value=$retPol.Count})
+$chartHtml = (New-ChartCard 'DLP enforcement posture' $donutDlp) +
+             (New-ChartCard 'Label encryption coverage' $donutLbl) +
+             (New-ChartCard 'Control inventory by type' $areaBars)
 
-    $detailHtml =
-        "<details open><summary>Sensitivity labels ($lblTotal)</summary>$(New-Table $labels @('DisplayName','Priority','ContentType','ParentLabel','EncryptionEnabled','ContentMarking','Disabled'))</details>" +
-        "<details><summary>Label &amp; auto-label policies ($($labelPol.Count + $autoPol.Count))</summary>$(New-Table $labelPol @('Name','Mode','Enabled','Labels','Workload'))$(New-Table $autoPol @('Name','Mode','Enabled','ApplySensitivityLabel','Workload'))</details>" +
-        "<details><summary>Custom sensitive information types ($sitCustom)</summary>$(New-Table (@($sits | Where-Object { Test-True $_.IsCustom })) @('Name','Type','Publisher'))</details>" +
-        "<details open><summary>DLP policies ($dlpTotal)</summary>$(New-Table $dlp @('Name','Mode','Enabled','Workload','Exchange','SharePoint','OneDrive','Teams','Endpoint'))</details>" +
-        "<details><summary>DLP rules ($($dlpRules.Count))</summary>$(New-Table $dlpRules @('Name','Policy','Disabled','BlockAccess','GenerateAlert','HasUserOverride','ReportSeverityLevel'))</details>" +
-        "<details open><summary>Retention labels ($retTotal)</summary>$(New-Table $retLab @('Name','RetentionAction','RetentionDuration','IsRecordLabel','Regulatory','FilePlan'))</details>" +
-        "<details><summary>Retention policies ($($retPol.Count))</summary>$(New-Table $retPol @('Name','Mode','Enabled','Workload','ScopeType'))</details>" +
-        "<details><summary>Audit configuration</summary>$(New-Table $auditIng @('UnifiedAuditLogIngestionEnabled','AdminAuditLogEnabled'))$(New-Table $auditRet @('Name','Priority','RecordTypes','RetentionDuration'))</details>" +
-        "<details><summary>Discovery manifest (every export, status &amp; count)</summary>$(New-Table $manifest @('Area','Artifact','Cmdlet','Status','Count'))</details>"
+$detailHtml =
+    "<details open><summary>Sensitivity labels ($lblTotal)</summary>$(New-Table $labels @('DisplayName','Priority','ContentType','ParentLabel','EncryptionEnabled','ContentMarking','Disabled'))</details>" +
+    "<details><summary>Label &amp; auto-label policies ($($labelPol.Count + $autoPol.Count))</summary>$(New-Table $labelPol @('Name','Mode','Enabled','Labels','Workload'))$(New-Table $autoPol @('Name','Mode','Enabled','ApplySensitivityLabel','Workload'))</details>" +
+    "<details><summary>Custom sensitive information types ($sitCustom)</summary>$(New-Table (@($sits | Where-Object { Test-True $_.IsCustom })) @('Name','Type','Publisher'))</details>" +
+    "<details open><summary>DLP policies ($dlpTotal)</summary>$(New-Table $dlp @('Name','Mode','Enabled','Workload','Exchange','SharePoint','OneDrive','Teams','Endpoint'))</details>" +
+    "<details><summary>DLP rules ($($dlpRules.Count))</summary>$(New-Table $dlpRules @('Name','Policy','Disabled','BlockAccess','GenerateAlert','HasUserOverride','ReportSeverityLevel'))</details>" +
+    "<details open><summary>Retention labels ($retTotal)</summary>$(New-Table $retLab @('Name','RetentionAction','RetentionDuration','IsRecordLabel','Regulatory','FilePlan'))</details>" +
+    "<details><summary>Retention policies ($($retPol.Count))</summary>$(New-Table $retPol @('Name','Mode','Enabled','Workload','ScopeType'))</details>" +
+    "<details><summary>Audit configuration</summary>$(New-Table $auditIng @('UnifiedAuditLogIngestionEnabled','AdminAuditLogEnabled'))$(New-Table $auditRet @('Name','Priority','RecordTypes','RetentionDuration'))</details>" +
+    "<details><summary>Discovery manifest (every export, status &amp; count)</summary>$(New-Table $manifest @('Area','Artifact','Cmdlet','Status','Count'))</details>"
 
-    if(-not $OutputPath){ $OutputPath = Join-Path $Path 'Purview-Source-Baseline-Report.html' }
-}
-else {
-    # ---------------- Comparison ----------------
-    $subtitle = 'Source-to-Target Migration Comparison'
-    if(Test-Path $Path -PathType Leaf){ $wbPath=$Path } else { $wbPath = Join-Path $Path '_MigrationMappingWorkbook.csv' }
-    if(-not (Test-Path $wbPath)){ throw "Migration workbook not found: $wbPath  (run Compare-SourceToTarget.ps1 first)." }
-    $wb = @(Import-Csv $wbPath)
-
-    $cMatch=@($wb | Where-Object Status -eq 'Match').Count
-    $cChg  =@($wb | Where-Object Status -eq 'Changed').Count
-    $cSrc  =@($wb | Where-Object Status -eq 'OnlyInSource').Count
-    $cTgt  =@($wb | Where-Object Status -eq 'OnlyInTarget').Count
-    $total =$wb.Count
-    # "% of source represented in target" -> denominator is source-side controls only (exclude target-only).
-    $srcTotal = $cMatch + $cChg + $cSrc
-    $pctMig= if($srcTotal){ [math]::Round((($cMatch+$cChg)/$srcTotal)*100) } else {0}
-
-    if($cSrc -gt 0){ Add-Obs 'Priority' 'Migration' 'Legacy controls exist only in the source tenant' "$cSrc controls were not found in the destination - retirement or recreate decisions are required." 'Review each against the consolidation matrix; retire obsolete controls and recreate any still required.' }
-    if($cChg -gt 0){ Add-Obs 'Improvement' 'Migration' 'Controls migrated with configuration drift' "$cChg controls exist in both tenants but differ - confirm the change was intentional." 'Validate each delta against the approved target-state design and record the rationale.' }
-    if($cTgt -gt 0){ Add-Obs 'Info' 'Migration' 'New controls introduced in the destination tenant' "$cTgt controls are net-new in the destination." 'Confirm each is intended and covered by an approval record for audit traceability.' }
-    if($cMatch -gt 0){ Add-Obs 'Healthy' 'Migration' 'Controls migrated cleanly (structural match)' "$cMatch controls structurally match on the compared properties. This is not a behavioural equivalence test - validate detection/enforcement behaviour before retiring the source control." $null }
-    if($total -eq 0){ Add-Obs 'Priority' 'Migration' 'No controls to compare' 'The workbook contained no rows.' 'Confirm both discovery runs completed and produced exports.' }
-
-    $narrative = "This report compares the Microsoft Purview configuration of the $(Enc $OrganizationName) source tenant against the rebuilt destination tenant. " +
-        "Of <b>$total</b> controls evaluated, <b>$cMatch</b> migrated cleanly, <b>$cChg</b> require design review, " +
-        "<b>$cSrc</b> exist only in the source (retirement candidates) and <b>$cTgt</b> are new in the destination. " +
-        "Approximately <b>$pctMig%</b> of source controls are represented in the destination target state."
-
-    $kpiHtml = (New-Kpi "$total" 'Controls evaluated' 'source + target' $Palette.Accent) +
-               (New-Kpi "$cMatch" 'Migrated cleanly' 'verify, then retire source' $Palette.Match) +
-               (New-Kpi "$cChg" 'Require review' 'configuration drift' $Palette.Changed) +
-               (New-Kpi "$cSrc" 'Retirement candidates' 'source only' $Palette.OnlyInSource) +
-               (New-Kpi "$cTgt" 'Net-new in target' 'confirm intended' $Palette.OnlyInTarget) +
-               (New-Kpi "$pctMig%" 'Coverage' 'source represented in target' ($(if($pctMig -ge 80){$Palette.Healthy}else{$Palette.Improvement})))
-
-    $donut = New-Donut -CenterValue "$total" -CenterLabel 'controls' -Segments @(
-        [pscustomobject]@{Label='Migrated cleanly';Value=$cMatch;Color=$Palette.Match},
-        [pscustomobject]@{Label='Changed';Value=$cChg;Color=$Palette.Changed},
-        [pscustomobject]@{Label='Source only';Value=$cSrc;Color=$Palette.OnlyInSource},
-        [pscustomobject]@{Label='Target only';Value=$cTgt;Color=$Palette.OnlyInTarget})
-    $areaItems = $wb | Group-Object Area | Sort-Object Name | ForEach-Object { [pscustomobject]@{Label=$_.Name;Value=$_.Count} }
-    $bars = New-Bars -Items $areaItems
-    $chartHtml = (New-ChartCard 'Migration status mix' $donut) + (New-ChartCard 'Controls compared by area' $bars)
-
-    $detailHtml=''
-    foreach($areaGrp in ($wb | Group-Object Area | Sort-Object Name)){
-        $open = if(@($areaGrp.Group | Where-Object Status -in 'OnlyInSource','Changed').Count){'open'}else{''}
-        $detailHtml += "<details $open><summary>$(Enc $areaGrp.Name) ($($areaGrp.Count))</summary>" +
-            (New-Table ($areaGrp.Group) @('Artifact','Key','Status','SuggestedDecision','ChangedProperties','SourceValues','TargetValues')) + "</details>"
-    }
-    if(-not $OutputPath){
-        $dir = if(Test-Path $Path -PathType Leaf){ Split-Path $Path -Parent } else { $Path }
-        $OutputPath = Join-Path $dir 'Purview-Migration-Comparison-Report.html'
-    }
-}
+if(-not $OutputPath){ $OutputPath = Join-Path $Path 'Purview-Discovery-Baseline-Report.html' }
 
 # Executive headline = top 3 most severe observations
 $headline = ($obs | Sort-Object @{e={$SevRank[$_.Severity]}} | Select-Object -First 3 | ForEach-Object {
@@ -401,7 +336,7 @@ $html = @"
   </section>
 
   <section id="observations"><h2>Key Observations &amp; Recommendations</h2>
-    <p class="lead">Prioritised findings with recommended actions for the target-state rebuild.</p>
+    <p class="lead">Prioritised findings with recommended actions for remediation and rationalisation.</p>
     $(New-ObsHtml $obs)
   </section>
 
@@ -413,10 +348,10 @@ $html = @"
   <section id="method"><h2>Methodology &amp; Scope</h2>
     <p class="lead">How this report was produced and what it does and does not cover.</p>
     <div class="narr" style="border-left-color:var(--muted)">
-      This report was generated from a <b>read-only</b> discovery export of the source tenant's Microsoft Purview
+      This report was generated from a <b>read-only</b> discovery export of the tenant's Microsoft Purview
       configuration (Information Protection, Classification, Data Loss Prevention, Data Lifecycle and Records, and Audit
       configuration), collected via Security &amp; Compliance and Exchange Online PowerShell. It reflects configuration
-      observed at the time of discovery and is provided to support migration planning and rationalisation.
+      observed at the time of discovery and is provided to support assessment and rationalisation.
       It is <b>not</b> a compliance attestation. Items that cannot be exported programmatically - custom trainable
       classifiers, disposition-review state, Compliance Manager evidence, and Activity Explorer trends - are captured
       manually and are out of scope of the automated sections above.
