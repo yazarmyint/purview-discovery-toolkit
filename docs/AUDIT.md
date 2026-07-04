@@ -5,6 +5,11 @@ discovery scripts after the discovery-only refocus — A `Invoke-PurviewSourceDi
 B `Export-PurviewContentInventory.ps1`, C `Export-PurviewAuditSample.ps1`,
 E `New-PurviewReport.ps1`._
 
+> **Resolution status (updated after the audit):** Script C findings **S1, S2, S12** are
+> **resolved**, and the **S15 `-DaysBack` item** is resolved — see commit `0deb408` and
+> [CHANGELOG.md](../CHANGELOG.md). Entries below are annotated in place; all other findings
+> (S3–S11, S13–S14, and the remaining S15 items) remain open.
+
 ## Method
 Cmdlet, parameter, enum, and return-shape claims below were verified against the current
 `learn.microsoft.com` PowerShell reference rather than asserted from memory. Verified facts
@@ -34,6 +39,7 @@ diagnostics (returns a `byte[]`) and does not mutate state. Invariant holds.
 ## Should fix (ranked by severity)
 
 ### S1 — C: one malformed `AuditData` row aborts the entire audit run
+> **✅ Resolved in `0deb408`** — `Expand-AuditRow` guards the parse (null/empty/malformed → warn + skip, never terminate); a durable per-type Kept/Skipped tally is written to `_AuditSampleSummary.csv`. See CHANGELOG.md.
 - **Where:** `Export-PurviewAuditSample.ps1` line 81 (`Expand-AuditRow` in a pipeline) → lines 39–41 (`ConvertFrom-Json`).
 - **What's wrong:** `$ErrorActionPreference='Stop'` (line 26) is global, and the
   `$all | … | ForEach-Object { Expand-AuditRow … }` at line 81 is not inside a try/catch.
@@ -46,6 +52,7 @@ diagnostics (returns a `byte[]`) and does not mutate state. Invariant holds.
   `if ($rec.AuditData) { … }` and emit the row with empty policy/SIT fields on failure.
 
 ### S2 — C: `-MaxPerType` is a global budget, biasing the sample to the start of the window
+> **✅ Resolved in `0deb408`** — replaced with a per-day budget `-MaxPerDay` (default 5000); the day loop now always traverses the full window, and a test pins the per-day distribution. Breaking param rename. See CHANGELOG.md.
 - **Where:** `Export-PurviewAuditSample.ps1` lines 63 & 73 (`$all.Count -lt $MaxPerType` gates both the day loop and the page loop).
 - **What's wrong:** `$all` accumulates across all days for a record type; both loops stop once
   the total hits `MaxPerType` (default 50,000). A busy early day can exhaust the budget so
@@ -131,6 +138,7 @@ Lines 115–130 (SIT rule packages) & 135–148 (EDM): the manifest `.Add` is in
 which writes a `CmdletNotAvailable` row. Add an else-branch manifest row for parity.
 
 ### S12 — C: CSV duplicates the raw audit blob
+> **✅ Resolved in `0deb408`** — `RawAuditData` dropped from the per-type CSV; `raw.json` retains full fidelity.
 Line 54 (`RawAuditData = $rec.AuditData`) is written to `$rt.csv` (82) *and* to `$rt.raw.json`
 (83). The CSV then carries full nested audit JSON per row — heavy, hard to read, doubly-stores
 sensitive detail. Drop `RawAuditData` from the CSV (raw.json preserves fidelity).
@@ -147,6 +155,7 @@ inconsistent with A. Also the `TrainableClassifier`-with-no-`-Tags` early `retur
 happens after `New-Item` created the folder (line 34), leaving an empty `ContentInventory-*` dir.
 
 ### S15 — E & C: PowerShell hygiene / minor
+> **◑ Partially resolved in `0deb408`** — the C `$DaysBack` `[ValidateRange(1,365)]` guard is done. The C `MIPLabel` casing and the inaccurate `.NOTES` "silently skipped" wording, plus all E and A items in this bucket, remain open (intentionally deferred).
 - **E:** `$dlpBlk` is computed but never used (dead variable). `Test-True`'s inline `(?i)`
   (line 42) is redundant — `-match` is already case-insensitive.
 - **E:** `Enc` doesn't escape `'`; safe today (user text lands only in element *content*;
