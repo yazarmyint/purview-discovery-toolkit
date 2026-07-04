@@ -103,19 +103,49 @@ Example:
 
 ---
 
-## Limitations & caveats
+## Limitations
 
-- **Not a compliance attestation.** This reflects configuration observed at a point in
-  time, to support assessment and rationalization.
-- **The audit export is a sample.** Unified-audit `ReturnLargeSet` is capped at ~50,000
-  records per session and returns unsorted; the script segments by day to stay under the
-  cap, but for complete, durable evidence forward the audit log to a SIEM or use the
-  Purview Audit Search Graph API.
-- **Some artifacts aren't fully exportable.** Custom trainable classifiers and EDM
-  schemas have no complete programmatic export; document them manually from the portal.
-- **Audit record types:** endpoint-DLP and disposition activity are captured under the
-  `DLPEndpoint` and `MultiStageDisposition` record types respectively (not
-  `ComplianceDLPEndpoint` / `Disposition`, which are not valid enum members).
+Grouped by whether a limit is imposed by the platform or is an intentional design choice.
+Each reflects the toolkit as it actually behaves.
+
+**Platform / data source** — imposed by Microsoft 365, not the toolkit:
+
+- **Audit volume ceiling.** `Search-UnifiedAuditLog` returns at most ~50,000 results per
+  session. The audit export windows by day (one session per day), so any single day + record
+  type exceeding ~50,000 events cannot be fully captured. Days that stop while more results
+  remain are **flagged** in `_AuditSampleSummary.csv` (`Truncated` / `TruncationReason`), so an
+  incomplete day is never silent. For exhaustive, durable evidence, forward the unified audit
+  log to a SIEM (e.g., Microsoft Sentinel) or use the Purview Audit Search Graph API.
+- **Audit ingestion latency.** Events can take from minutes to ~24 hours (longer for some
+  workloads) to surface in the unified audit log, so a "last N days" run may under-report the
+  most recent hours.
+- **Audit retention is license-dependent.** Audit Standard retains ~180 days; Audit Premium /
+  E5 up to ~1 year. The toolkit cannot query beyond the tenant's retention window.
+- **Content Explorer is a computed index.** It requires the Content Explorer List Viewer or
+  Content Viewer role (not granted by Compliance Administrator — see Permissions). An access
+  error is a permissions gap, not an empty environment, and Content Explorer has its own
+  coverage and refresh latency.
+
+**Design scope** — intentional:
+
+- **Read-only, point-in-time snapshot.** The scripts only issue `Get-*` / `Search-*` /
+  `Export-*` cmdlets. This is a configuration snapshot for assessment — not continuous
+  monitoring and not a compliance attestation.
+- **No Microsoft Graph.** Collection uses Security & Compliance and Exchange Online PowerShell
+  only, to avoid app-registration / admin-consent friction. Data available only via Graph is
+  out of scope.
+- **E5 is assumed, not detected.** The scripts don't check licensing; a blank or missing
+  section may reflect an unlicensed feature rather than an unconfigured one.
+- **Custom classifiers are only partly exportable.** Sensitive information type rule packages
+  (the regex/keyword logic) and EDM *schemas* are exported as XML. The EDM data set itself and
+  trainable classifiers have no export cmdlet and must be documented manually from the portal.
+- **Blank projected properties.** Some CSV columns can be empty where a cmdlet's output shape
+  differs across tenants or module versions — a blank value means "not projected here," not
+  necessarily "not configured."
+
+**Audit record types.** Endpoint-DLP and disposition-review activity are captured under the
+`DLPEndpoint` and `MultiStageDisposition` record types respectively (not `ComplianceDLPEndpoint`
+/ `Disposition`, which are not valid `AuditLogRecordType` enum members).
 
 ---
 
