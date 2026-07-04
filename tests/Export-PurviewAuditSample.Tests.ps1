@@ -244,20 +244,20 @@ Describe 'S2 - per-day budget: every day represented, early flood capped (integr
         Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
         Mock Connect-ExchangeOnline {}
         $calls = @{}
-        # 3-day window. The earliest day floods across multiple pages (5 pages x 2 = 10 rows
-        # available); the middle and latest days each return a single 2-row page. Age thresholds
-        # are set wide (2.5 / 1.5) so execution-time drift can't misclassify a day.
+        # 3-day window. The earliest day floods across multiple pages (ResultCount=10 available);
+        # the middle and latest days each return a single, complete 2-row page (ResultCount=2). Age
+        # thresholds are wide (2.5 / 1.5) so execution-time drift can't misclassify a day.
         Mock Search-UnifiedAuditLog {
             if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
             $calls[$SessionId]++
             $p = $calls[$SessionId]
             $age = ((Get-Date).ToUniversalTime() - $StartDate).TotalDays
             if ($age -gt 2.5) {
-                if ($p -le 5) { 1..2 | ForEach-Object { [pscustomobject]@{ Identity = "early-$p-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; AuditData = (@{ Operation = 'X'; UserId = 'EARLYDAY' } | ConvertTo-Json) } } } else { @() }
+                if ($p -le 5) { 1..2 | ForEach-Object { $ix = (($p - 1) * 2) + $_; [pscustomobject]@{ Identity = "early-$p-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; ResultIndex = $ix; ResultCount = 10; AuditData = (@{ Operation = 'X'; UserId = 'EARLYDAY' } | ConvertTo-Json) } } } else { @() }
             } elseif ($age -lt 1.5) {
-                if ($p -le 1) { 1..2 | ForEach-Object { [pscustomobject]@{ Identity = "late-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; AuditData = (@{ Operation = 'X'; UserId = 'LATEDAY' } | ConvertTo-Json) } } } else { @() }
+                if ($p -le 1) { 1..2 | ForEach-Object { [pscustomobject]@{ Identity = "late-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; ResultIndex = $_; ResultCount = 2; AuditData = (@{ Operation = 'X'; UserId = 'LATEDAY' } | ConvertTo-Json) } } } else { @() }
             } else {
-                if ($p -le 1) { 1..2 | ForEach-Object { [pscustomobject]@{ Identity = "mid-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; AuditData = (@{ Operation = 'X'; UserId = 'MIDDAY' } | ConvertTo-Json) } } } else { @() }
+                if ($p -le 1) { 1..2 | ForEach-Object { [pscustomobject]@{ Identity = "mid-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; ResultIndex = $_; ResultCount = 2; AuditData = (@{ Operation = 'X'; UserId = 'MIDDAY' } | ConvertTo-Json) } } } else { @() }
             }
         }
     }
@@ -265,10 +265,19 @@ Describe 'S2 - per-day budget: every day represented, early flood capped (integr
         $root = New-Root
         Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 3 -MaxPerDay 4
         $rows = Import-Csv (Join-Path (Get-SampleDir $root) 'DLPEndpoint.csv')
-        ($rows | Where-Object { $_.UserId -eq 'EARLYDAY' }).Count | Should -Be 4   # flood capped at the per-day budget
-        ($rows | Where-Object { $_.UserId -eq 'MIDDAY'  }).Count | Should -Be 2   # middle day fully represented
-        ($rows | Where-Object { $_.UserId -eq 'LATEDAY' }).Count | Should -Be 2   # latest day fully represented (was 0 pre-fix)
+        # Distribution (unchanged): every day represented, the flood capped at the per-day budget.
+        ($rows | Where-Object { $_.UserId -eq 'EARLYDAY' }).Count | Should -Be 4
+        ($rows | Where-Object { $_.UserId -eq 'MIDDAY'  }).Count | Should -Be 2
+        ($rows | Where-Object { $_.UserId -eq 'LATEDAY' }).Count | Should -Be 2
         $rows.Count | Should -Be 8
+        # Truncation (added, not replacing the above): only the flooded early day is truncated, at
+        # its budget; the complete mid/late days are not.
+        $sum = Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv')
+        ($sum | Where-Object { $_.Truncated -eq 'True' }).Count       | Should -Be 1
+        $truncRow = $sum | Where-Object { $_.Truncated -eq 'True' }
+        $truncRow.TruncationReason | Should -Be 'MaxPerDay'
+        $truncRow.Retrieved        | Should -Be 4
+        ($sum | Where-Object { $_.TruncationReason -eq 'none' }).Count | Should -Be 2
     }
 }
 
@@ -331,5 +340,143 @@ Describe 'S15 - parameter validation' {
     It '[RED->green after S15] rejects a non-positive -DaysBack instead of silently sampling nothing' {
         { Invoke-C -Root (New-Root) -RecordTypes @('DLPEndpoint') -DaysBack 0 }  | Should -Throw
         { Invoke-C -Root (New-Root) -RecordTypes @('DLPEndpoint') -DaysBack -5 } | Should -Throw
+    }
+}
+
+Describe 'Phase 1 - default window is 7 days' {
+    BeforeAll {
+        Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+        Mock Connect-ExchangeOnline {}
+        Mock Search-UnifiedAuditLog { @() }
+    }
+    It '[RED->green after default change] omitting -DaysBack searches seven one-day windows' {
+        # Invoked directly (not via Invoke-C, which passes -DaysBack) to exercise the script default.
+        & $script:ScriptPath -SourceUpn 'x@y.example' -OutputRoot (New-Root) -RecordTypes @('DLPEndpoint') `
+            -MaxPerDay 5000 -ReuseExistingSession *> $null
+        Should -Invoke Search-UnifiedAuditLog -Exactly -Times 7
+    }
+}
+
+Describe 'Phase 2 - truncation flagging in _AuditSampleSummary.csv (integration)' {
+    Context 'MaxPerDay budget reached while more results exist' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            $calls = @{}
+            # Pages of 2, ResultCount=10 (10 available); MaxPerDay 4 stops us after 2 pages.
+            Mock Search-UnifiedAuditLog {
+                if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
+                $calls[$SessionId]++
+                $p = $calls[$SessionId]
+                if ($p -le 5) {
+                    1..2 | ForEach-Object {
+                        $ix = (($p - 1) * 2) + $_
+                        [pscustomobject]@{ Identity = "r$ix"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; ResultIndex = $ix; ResultCount = 10; AuditData = (@{ Operation = 'X'; UserId = 'u' } | ConvertTo-Json) }
+                    }
+                } else { @() }
+            }
+        }
+        It '[RED->green after Phase 2] flags Truncated / TruncationReason=MaxPerDay' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1 -MaxPerDay 4
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Retrieved        | Should -Be 4
+            $row.Truncated        | Should -Be 'True'
+            $row.TruncationReason | Should -Be 'MaxPerDay'
+        }
+    }
+    Context 'Session ~50k ceiling reached before the budget (more available)' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            $calls = @{}
+            # One page of 10 with ResultCount=25, then empty: the platform stopped feeding us
+            # though more existed (scaled-down analogue of the 50,000-per-session ceiling).
+            Mock Search-UnifiedAuditLog {
+                if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
+                $calls[$SessionId]++
+                if ($calls[$SessionId] -eq 1) {
+                    1..10 | ForEach-Object { [pscustomobject]@{ Identity = "r$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; ResultIndex = $_; ResultCount = 25; AuditData = (@{ Operation = 'X'; UserId = 'u' } | ConvertTo-Json) } }
+                } else { @() }
+            }
+        }
+        It '[RED->green after Phase 2] flags Truncated / TruncationReason=SessionCap-50k' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1 -MaxPerDay 1000
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Truncated        | Should -Be 'True'
+            $row.TruncationReason | Should -Be 'SessionCap-50k'
+        }
+    }
+    Context 'Day fully retrieved (nothing more available)' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            $calls = @{}
+            # 6 rows, ResultCount=6 (exhausted), then empty. Count == cap must NOT read as truncated.
+            Mock Search-UnifiedAuditLog {
+                if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
+                $calls[$SessionId]++
+                if ($calls[$SessionId] -eq 1) {
+                    1..6 | ForEach-Object { [pscustomobject]@{ Identity = "r$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; ResultIndex = $_; ResultCount = 6; AuditData = (@{ Operation = 'X'; UserId = 'u' } | ConvertTo-Json) } }
+                } else { @() }
+            }
+        }
+        It '[RED->green after Phase 2] flags Truncated=False / TruncationReason=none' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1 -MaxPerDay 1000
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Truncated        | Should -Be 'False'
+            $row.TruncationReason | Should -Be 'none'
+        }
+    }
+}
+
+Describe 'Phase 2 - truncation fallback when paging fields are absent (integration)' {
+    Context 'Stopped at MaxPerDay but rows carry no ResultIndex/ResultCount' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            $calls = @{}
+            # Pages of 2 with NO ResultIndex/ResultCount; more pages exist but MaxPerDay 4 stops us,
+            # so completeness cannot be confirmed from the response.
+            Mock Search-UnifiedAuditLog {
+                if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
+                $calls[$SessionId]++
+                if ($calls[$SessionId] -le 5) {
+                    1..2 | ForEach-Object { [pscustomobject]@{ Identity = "n$($calls[$SessionId])-$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; AuditData = (@{ Operation = 'X'; UserId = 'u' } | ConvertTo-Json) } }
+                } else { @() }
+            }
+        }
+        It '[green] flags Truncated=True / TruncationReason=MaxPerDay? (possibly truncated, not silent none)' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1 -MaxPerDay 4
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Retrieved        | Should -Be 4
+            $row.Truncated        | Should -Be 'True'
+            $row.TruncationReason | Should -Be 'MaxPerDay?'
+        }
+    }
+    Context 'Exhausted under budget with fields absent (empty page confirms completeness)' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            $calls = @{}
+            # 3 rows (no fields) then an empty page: genuine exhaustion well below the budget.
+            Mock Search-UnifiedAuditLog {
+                if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
+                $calls[$SessionId]++
+                if ($calls[$SessionId] -eq 1) {
+                    1..3 | ForEach-Object { [pscustomobject]@{ Identity = "r$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; AuditData = (@{ Operation = 'X'; UserId = 'u' } | ConvertTo-Json) } }
+                } else { @() }
+            }
+        }
+        It '[green] stays Truncated=False / none (an empty page under budget means complete)' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1 -MaxPerDay 1000
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Truncated        | Should -Be 'False'
+            $row.TruncationReason | Should -Be 'none'
+        }
     }
 }

@@ -3,6 +3,19 @@
 ## Unreleased — `Export-PurviewAuditSample.ps1` hardening
 
 ### Changed
+- **Default window is now the last 7 days** (`-DaysBack` default 30 → 7), matching the unattended
+  weekly-snapshot use case and dropping the worst-case volume from ~1.05M to ~245k rows. The
+  parameter name and `[ValidateRange(1, 365)]` are unchanged.
+- **`_AuditSampleSummary.csv` is now per-record-type-per-day and flags truncation.** Columns are
+  `RecordType, Day, Retrieved, Kept, Skipped, Truncated, TruncationReason`
+  (`MaxPerDay | SessionCap-50k | MaxPerDay? | none`); previously they were
+  `RecordType, RawRecords, Kept, Skipped` (per type). Under the complete-capture model, a day that
+  stops while more results still exist — because the per-day budget or the ~50k
+  `Search-UnifiedAuditLog` session ceiling was reached — is recorded, not silent. Detection is off
+  more-pages-available (`ResultIndex < ResultCount`), not a count==cap coincidence; the run echoes a
+  truncated-slice count. As a safety net, a day that stops at the budget but whose response lacks
+  `ResultCount` to confirm completeness is flagged `MaxPerDay?` (possibly truncated) rather than
+  silently `none`.
 - **The audit sample now spans the whole window (S2).** The `-MaxPerType` parameter — a single
   *global* cap across all days — is replaced by **`-MaxPerDay` (default 5,000)**, applied per day.
   Previously the global cap filled on the earliest day(s) of a busy tenant and later days were
@@ -26,6 +39,7 @@
   instead of silently inverting the window and sampling nothing.
 
 ### Added
-- Offline Pester v5 test suite under `tests/` (16 tests) covering read-only integrity, the
+- Offline Pester v5 test suite under `tests/` (22 tests) covering read-only integrity, the
   `Expand-AuditRow` parse paths, day-windowing, dedup, intra-day multi-page `ReturnLargeSet`
-  consumption, and the S1 / S2 / S12 regressions. Run with `pwsh -File tests/Invoke-Tests.ps1`.
+  consumption, the default 7-day window, per-day truncation flagging (MaxPerDay / SessionCap-50k /
+  none), and the S1 / S2 / S12 / S15 regressions. Run with `pwsh -File tests/Invoke-Tests.ps1`.

@@ -11,16 +11,19 @@
     (not 'ComplianceDLPEndpoint'); disposition review = 'MultiStageDisposition' (not 'Disposition').
     UAL (Audit Standard) retains ~180 days; Audit Premium / E5 up to ~1 year. ReturnLargeSet
     caps at 50,000 results per session, so the window is segmented per day with a fresh
-    SessionId. -MaxPerDay bounds the rows kept for each day (default 5,000), so every day in the
-    window is represented rather than the sample front-loading onto the busiest early days;
-    worst-case volume is roughly MaxPerDay x days x record types. For full, durable evidence
-    forward UAL to SIEM (Sentinel) - this is a sample.
+    SessionId. The run captures the last -DaysBack days (default 7). -MaxPerDay bounds the rows kept
+    for each day (default 5,000) as a runaway guardrail, so every day in the window is represented;
+    worst-case volume is roughly MaxPerDay x days x record types. _AuditSampleSummary.csv records
+    Retrieved / Kept / Skipped per record-type-per-day and flags any day where collection stopped
+    while more results remained (Truncated + TruncationReason: MaxPerDay | SessionCap-50k | none, or
+    MaxPerDay? when the budget was hit but the response lacked ResultCount to confirm completeness),
+    so an incomplete day is never silent. For full, durable evidence forward UAL to SIEM (Sentinel).
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$SourceUpn,
     [string]$OutputRoot = "C:\PurviewDiscovery",
-    [ValidateRange(1, 365)][int]$DaysBack = 30,
+    [ValidateRange(1, 365)][int]$DaysBack = 7,
     [string[]]$RecordTypes = @('ComplianceDLPSharePoint','ComplianceDLPExchange','DLPEndpoint',
                                'SensitivityLabelAction','SensitivityLabeledFileAction','MIPLabel','MultiStageDisposition'),
     [int]$MaxPerDay = 5000,
@@ -73,14 +76,20 @@ function Expand-AuditRow($rec,[string]$rt) {
     }
 }
 
-# Per-type tally so the count of rows dropped by the AuditData parse guard (S1) is durable, not
-# just a transient warning. Written to _AuditSampleSummary.csv and echoed as a run total.
-$summary = [System.Collections.Generic.List[object]]::new()
-$totalKept = 0; $totalSkipped = 0
+# _AuditSampleSummary.csv makes coverage durable: one row per record-type-per-day recording
+# Retrieved / Kept / Skipped, and flagging any day where we stopped fetching while more results
+# still existed (Truncated + TruncationReason). Under the "complete capture" model a truncated day
+# is an incomplete snapshot, so it must never be silent. See docs/AUDIT.md S1/S2.
+$summary   = [System.Collections.Generic.List[object]]::new()
+$totalKept = 0; $totalSkipped = 0; $truncCount = 0
 
 foreach ($rt in $RecordTypes) {
     Write-Host "Searching record type: $rt ..." -ForegroundColor Yellow
-    $all = [System.Collections.Generic.List[object]]::new()
+    $seenIds  = [System.Collections.Generic.HashSet[string]]::new()   # per-type dedup key (Identity)
+    $allRaw   = [System.Collections.Generic.List[object]]::new()      # raw records -> .raw.json
+    $keptRows = [System.Collections.Generic.List[object]]::new()      # projected rows -> .csv
+    $typeKept = 0; $typeSkipped = 0
+
     # Segment per-day with a fresh SessionId (a single ReturnLargeSet session returns up to
     # 50,000 records). The budget is applied PER DAY, so the whole window is always traversed
     # and a busy early day cannot starve later days of representation. See docs/AUDIT.md S2.
@@ -89,33 +98,80 @@ foreach ($rt in $RecordTypes) {
         $winStart = $day
         $winEnd   = $day.AddDays(1); if ($winEnd -gt $endUtc) { $winEnd = $endUtc }
         $sid = [guid]::NewGuid().ToString()
-        $dayStart = $all.Count                                        # rows collected before this day
+        $dayRaw = [System.Collections.Generic.List[object]]::new()
+        $resultCount = 0; $maxIndex = 0                              # ReturnLargeSet paging progress
         try {
             do {
                 $page = Search-UnifiedAuditLog -StartDate $winStart -EndDate $winEnd -RecordType $rt -Formatted `
                             -SessionId $sid -SessionCommand ReturnLargeSet -ResultSize 5000
-                if ($page) { $page | ForEach-Object { $all.Add($_) } }
+                if ($page) {
+                    $page | ForEach-Object {
+                        $dayRaw.Add($_)
+                        # ResultIndex = this record's position; ResultCount = total matching for the day
+                        # (ResultIndex is -1 on an internal search timeout, so ignore non-positive values).
+                        if ($_.ResultCount) { $rc = [int]$_.ResultCount; if ($rc -gt $resultCount) { $resultCount = $rc } }
+                        if ($_.ResultIndex) { $ix = [int]$_.ResultIndex; if ($ix -gt $maxIndex)    { $maxIndex    = $ix } }
+                    }
+                }
             # Terminate on an empty page, or once this day has reached its per-day budget.
-            } while ($page -and @($page).Count -gt 0 -and ($all.Count - $dayStart) -lt $MaxPerDay)
+            } while ($page -and @($page).Count -gt 0 -and $dayRaw.Count -lt $MaxPerDay)
         } catch {
             Write-Warning "  $rt $($winStart.ToString('yyyy-MM-dd')) failed: $($_.Exception.Message)"
         }
+
+        # Truncation is detected off more-pages-available (we retrieved fewer than matched), NOT off a
+        # count==cap coincidence. If we stopped at our own budget it's MaxPerDay; if the platform
+        # stopped feeding us first (the ~50k per-session ceiling) it's SessionCap-50k.
+        $retrieved     = $dayRaw.Count
+        $hitBudget     = $retrieved -ge $MaxPerDay                    # loop stopped at our budget, not an empty page
+        $moreAvailable = ($resultCount -gt 0) -and ($maxIndex -lt $resultCount)
+        $reason = 'none'
+        if ($moreAvailable) {
+            $reason = if ($hitBudget) { 'MaxPerDay' } else { 'SessionCap-50k' }
+        }
+        elseif ($hitBudget -and $resultCount -le 0) {
+            # We stopped at the budget but the response carried no ResultCount to confirm the day was
+            # exhausted (ResultIndex/ResultCount are documented as always-populated general properties,
+            # but -Formatted / older modules are not guaranteed) - flag possibly-truncated, never silent.
+            $reason = 'MaxPerDay?'
+        }
+
+        # Dedup this day against the per-type seen-set (ReturnLargeSet is unsorted and can repeat
+        # within a session; a per-type set also guards the rare day-boundary overlap).
+        $dayUnique = [System.Collections.Generic.List[object]]::new()
+        foreach ($r in $dayRaw) { if ($seenIds.Add("$($r.Identity)")) { $dayUnique.Add($r) } }
+        $dayRows = @($dayUnique | ForEach-Object { Expand-AuditRow $_ $rt })
+        $kept    = $dayRows.Count
+        $skipped = $dayUnique.Count - $kept                          # dropped by the AuditData parse guard (S1)
+        $dayRows | ForEach-Object { $keptRows.Add($_) }
+        $dayRaw  | ForEach-Object { $allRaw.Add($_) }
+
+        if ($reason -ne 'none') {
+            $truncCount++
+            Write-Warning "  $rt $($winStart.ToString('yyyy-MM-dd')): TRUNCATED ($reason) - retrieved $retrieved of $resultCount available for this day."
+        }
+        $summary.Add([pscustomobject]@{
+            RecordType       = $rt
+            Day              = $winStart.ToString('yyyy-MM-dd')
+            Retrieved        = $retrieved
+            Kept             = $kept
+            Skipped          = $skipped
+            Truncated        = ($reason -ne 'none')
+            TruncationReason = $reason
+        })
+        $typeKept  += $kept; $typeSkipped  += $skipped
+        $totalKept += $kept; $totalSkipped += $skipped
         $day = $day.AddDays(1)
     }
 
-    if ($all.Count) {
-        $deduped = @($all | Sort-Object Identity -Unique)                                          # dedupe (ReturnLargeSet is unsorted)
-        $rows    = @($deduped | ForEach-Object { Expand-AuditRow $_ $rt })
-        $kept    = $rows.Count
-        $skipped = $deduped.Count - $kept                                                          # rows dropped by the AuditData parse guard (S1)
-        $rows | Export-Csv (Join-Path $outDir "$rt.csv") -NoTypeInformation -Encoding utf8
-        $all  | ConvertTo-Json -Depth 8 | Out-File (Join-Path $outDir "$rt.raw.json") -Encoding utf8
-        $skipNote = if ($skipped) { " ($skipped skipped - unparseable AuditData)" } else { '' }
-        Write-Host "  $rt : $kept records$skipNote." -ForegroundColor Green
-    } else { $kept = 0; $skipped = 0; Write-Host "  $rt : 0 records." -ForegroundColor DarkGray }
-    $summary.Add([pscustomobject]@{ RecordType = $rt; RawRecords = @($all).Count; Kept = $kept; Skipped = $skipped })
-    $totalKept += $kept; $totalSkipped += $skipped
+    if ($keptRows.Count) { $keptRows | Export-Csv (Join-Path $outDir "$rt.csv") -NoTypeInformation -Encoding utf8 }
+    if ($allRaw.Count)   { $allRaw | ConvertTo-Json -Depth 8 | Out-File (Join-Path $outDir "$rt.raw.json") -Encoding utf8 }
+    if ($typeKept -or $typeSkipped) {
+        $skipNote = if ($typeSkipped) { " ($typeSkipped skipped - unparseable AuditData)" } else { '' }
+        Write-Host "  $rt : $typeKept records$skipNote." -ForegroundColor Green
+    } else { Write-Host "  $rt : 0 records." -ForegroundColor DarkGray }
 }
 $summary | Export-Csv (Join-Path $outDir '_AuditSampleSummary.csv') -NoTypeInformation -Encoding utf8
 Write-Host "Saved: $outDir" -ForegroundColor Cyan
-Write-Host "Totals: $totalKept kept, $totalSkipped skipped (unparseable AuditData). Summary: $(Join-Path $outDir '_AuditSampleSummary.csv')" -ForegroundColor Cyan
+$truncNote = if ($truncCount) { "$truncCount day/type slice(s) TRUNCATED - see _AuditSampleSummary.csv" } else { 'no slices truncated' }
+Write-Host "Totals: $totalKept kept, $totalSkipped skipped (unparseable AuditData); $truncNote." -ForegroundColor Cyan
