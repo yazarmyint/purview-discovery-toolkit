@@ -23,7 +23,7 @@ AuditSample-*/
 
 # To intentionally ship a SYNTHETIC sample artifact (never one with real data),
 # force-add it past these rules:
-#   git add -f examples/sample-report.html
+#   git add -f examples/<synthetic-sample>.html
 # ...or add a scoped negation, e.g.:
 #   !examples/*.html
 

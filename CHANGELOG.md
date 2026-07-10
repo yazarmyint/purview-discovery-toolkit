@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — discovery-refocus batch 1
+
+### Removed
+- `examples/sample-report.html` — posture-era sample (pre-refocus; contained "Posture
+  Overview" and "Key Observations & Recommendations" content that contradicts the
+  discovery-only mission, see `docs/DECISIONS.md` D1). A discovery sample will be
+  regenerated after the report split.
+
 ## Unreleased — `Export-PurviewAuditSample.ps1` hardening
 
 ### Changed
