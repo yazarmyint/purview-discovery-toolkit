@@ -11,6 +11,13 @@
   `_manifest.csv` rows collected so far and closes the transcript. Previously a mid-run
   terminating error lost the manifest entirely and left the transcript running,
   silently capturing the rest of the console session.
+- **`_AuditSampleSummary.csv` gains `Status` and `Error` columns.** A day-slice whose
+  `Search-UnifiedAuditLog` loop threw previously recorded `Retrieved`=partial-or-0 with
+  `Truncated=False` — indistinguishable from a genuinely quiet day. The day-loop catch now
+  stamps `Status=Failed` (D9 vocabulary) plus the exception message in `Error`; clean days
+  record `Status=Success`. Columns are now
+  `RecordType, Day, Status, Retrieved, Kept, Skipped, Truncated, TruncationReason, Error`.
+  **Breaking (pre-release):** second schema change to this file on this branch.
 - **The test suite runs under both Windows PowerShell 5.1 and PowerShell 7** (D8). Fixed
   three 5.1 breaks: a multi-argument `Join-Path` (PS 6.2+ only), a `$PSScriptRoot`
   parameter default in `Invoke-Tests.ps1` (empty when evaluated in a param default under

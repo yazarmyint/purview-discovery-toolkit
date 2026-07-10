@@ -17,7 +17,9 @@
     Retrieved / Kept / Skipped per record-type-per-day and flags any day where collection stopped
     while more results remained (Truncated + TruncationReason: MaxPerDay | SessionCap-50k | none, or
     MaxPerDay? when the budget was hit but the response lacked ResultCount to confirm completeness),
-    so an incomplete day is never silent. For full, durable evidence forward UAL to SIEM (Sentinel).
+    so an incomplete day is never silent. Each day row also carries Status (Success | Failed) and
+    Error: a day whose search threw records the exception durably instead of looking like a quiet
+    day. For full, durable evidence forward UAL to SIEM (Sentinel).
 #>
 [CmdletBinding()]
 param(
@@ -77,9 +79,10 @@ function Expand-AuditRow($rec,[string]$rt) {
 }
 
 # _AuditSampleSummary.csv makes coverage durable: one row per record-type-per-day recording
-# Retrieved / Kept / Skipped, and flagging any day where we stopped fetching while more results
-# still existed (Truncated + TruncationReason). Under the "complete capture" model a truncated day
-# is an incomplete snapshot, so it must never be silent. See docs/AUDIT.md S1/S2.
+# Status / Retrieved / Kept / Skipped, flagging any day where we stopped fetching while more
+# results still existed (Truncated + TruncationReason), and carrying the exception message
+# (Error) when the day's search threw. Under the "complete capture" model a truncated or
+# failed day is an incomplete snapshot, so it must never be silent. See docs/AUDIT.md S1/S2.
 $summary   = [System.Collections.Generic.List[object]]::new()
 $totalKept = 0; $totalSkipped = 0; $truncCount = 0
 
@@ -100,6 +103,7 @@ foreach ($rt in $RecordTypes) {
         $sid = [guid]::NewGuid().ToString()
         $dayRaw = [System.Collections.Generic.List[object]]::new()
         $resultCount = 0; $maxIndex = 0                              # ReturnLargeSet paging progress
+        $dayError = $null                                            # set when this day's search throws
         try {
             do {
                 $page = Search-UnifiedAuditLog -StartDate $winStart -EndDate $winEnd -RecordType $rt -Formatted `
@@ -116,6 +120,9 @@ foreach ($rt in $RecordTypes) {
             # Terminate on an empty page, or once this day has reached its per-day budget.
             } while ($page -and @($page).Count -gt 0 -and $dayRaw.Count -lt $MaxPerDay)
         } catch {
+            # Durable failure capture: the summary row gets Status=Failed + the message, so
+            # a failed or partially-retrieved day is never mistaken for a quiet day.
+            $dayError = $_.Exception.Message
             Write-Warning "  $rt $($winStart.ToString('yyyy-MM-dd')) failed: $($_.Exception.Message)"
         }
 
@@ -153,11 +160,13 @@ foreach ($rt in $RecordTypes) {
         $summary.Add([pscustomobject]@{
             RecordType       = $rt
             Day              = $winStart.ToString('yyyy-MM-dd')
+            Status           = $(if ($dayError) { 'Failed' } else { 'Success' })
             Retrieved        = $retrieved
             Kept             = $kept
             Skipped          = $skipped
             Truncated        = ($reason -ne 'none')
             TruncationReason = $reason
+            Error            = $(if ($dayError) { $dayError } else { '' })
         })
         $typeKept  += $kept; $typeSkipped  += $skipped
         $totalKept += $kept; $totalSkipped += $skipped

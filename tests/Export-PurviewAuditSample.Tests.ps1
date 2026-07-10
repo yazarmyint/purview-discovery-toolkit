@@ -317,6 +317,49 @@ Describe 'S1 - skipped rows are tallied durably (integration)' {
     }
 }
 
+Describe 'Day-slice failure capture - a failed day must not look like a quiet day (integration)' {
+    Context 'Mid-day failure (first page returned, second page throws)' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            $calls = @{}
+            # Page 1 delivers 2 rows (no ResultIndex/ResultCount), page 2 throws: the day
+            # dies mid-paging with a partial harvest. Without durable failure capture this
+            # summary row is indistinguishable from a complete, quiet-ish day.
+            Mock Search-UnifiedAuditLog {
+                if (-not $calls.ContainsKey($SessionId)) { $calls[$SessionId] = 0 }
+                $calls[$SessionId]++
+                if ($calls[$SessionId] -eq 1) {
+                    1..2 | ForEach-Object { [pscustomobject]@{ Identity = "r$_"; CreationDate = $StartDate; RecordType = 'DLPEndpoint'; AuditData = (@{ Operation = 'X'; UserId = 'u' } | ConvertTo-Json) } }
+                } else { throw 'Simulated 503 from the service' }
+            }
+        }
+        It '[RED->green after failure capture] records Status=Failed with the exception message in Error' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Status    | Should -Be 'Failed'
+            $row.Error     | Should -Match 'Simulated 503'
+            $row.Retrieved | Should -Be 2
+        }
+    }
+    Context 'Quiet day (no results, no failure)' {
+        BeforeAll {
+            Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+            Mock Connect-ExchangeOnline {}
+            Mock Search-UnifiedAuditLog { @() }
+        }
+        It '[RED->green after failure capture] records Status=Success with Retrieved=0 and no Error' {
+            $root = New-Root
+            Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1
+            $row = (Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv'))[0]
+            $row.Status    | Should -Be 'Success'
+            $row.Retrieved | Should -Be 0
+            $row.Error     | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'S15 - parameter validation' {
     BeforeAll {
         Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
