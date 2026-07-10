@@ -5,13 +5,16 @@
 # ReturnLargeSet paging (returns once per SessionId, then empty to terminate the page loop).
 #
 # Legend:
-#   [green] locks correct current behaviour (windowing, dedup, DLP parse, read-only, no-spurious-cap)
+#   [green] locks correct current behaviour (windowing, dedup, DLP parse, no-spurious-cap)
 #   [RED]   encodes an audit bug as a failing test today; flips green once the fix lands
 #           - S1: a malformed/empty/null AuditData row must not terminate the run
-#           - S2: later days must be represented when MaxPerType is small (per-day, not global, budget)
+#           - S2: later days must be represented when MaxPerDay is small (per-day, not global, budget)
+#
+# The read-only AST guard lives in ReadOnlyInvariant.Tests.ps1 (covers all scripts).
 
 BeforeAll {
-    $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'scripts' 'Export-PurviewAuditSample.ps1')).Path
+    # Nested Join-Path (multi-argument Join-Path is PS 6.2+; the suite runs on 5.1 too, D8).
+    $script:ScriptPath = Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts') 'Export-PurviewAuditSample.ps1'
 
     # Stubs so the EXO cmdlets exist as commands for Mock to hook (the module is never loaded).
     function Connect-ExchangeOnline { param([string]$UserPrincipalName, [switch]$ShowBanner) }
@@ -51,25 +54,6 @@ BeforeAll {
     }
 
     function New-Root { Join-Path $TestDrive ([guid]::NewGuid()) }
-}
-
-Describe 'Read-only invariant (static AST guard)' {
-    BeforeAll {
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
-        $script:CmdNames = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
-            ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Select-Object -Unique
-    }
-    It 'invokes no tenant-mutating cmdlets (Set/Remove/Enable/Disable/Update/Add, or non-local New-)' {
-        $allowedNew = @('New-Item', 'New-Object', 'New-Guid', 'New-Variable', 'New-TimeSpan')
-        $mutating = $script:CmdNames | Where-Object {
-            $_ -match '^(Set|Remove|Enable|Disable|Update|Add)-' -or ($_ -match '^New-' -and $_ -notin $allowedNew)
-        }
-        $mutating | Should -BeNullOrEmpty
-    }
-    It 'only touches the tenant through Search-/Connect- (+ Import-Module)' {
-        $external = $script:CmdNames | Where-Object { $_ -match '^(Search|Connect)-' -or $_ -eq 'Import-Module' }
-        foreach ($c in $external) { $c | Should -Match '^(Search-UnifiedAuditLog|Connect-ExchangeOnline|Import-Module)$' }
-    }
 }
 
 Describe 'Expand-AuditRow (JSON parse paths)' {
@@ -153,7 +137,7 @@ Describe 'Dedup - rows sharing an Identity collapse (integration)' {
             )
         }
     }
-    It '[green] Sort-Object Identity -Unique keeps one row per Identity' {
+    It '[green] the per-type seen-set (HashSet on Identity) keeps one row per Identity' {
         $root = New-Root
         Invoke-C -Root $root -RecordTypes @('DLPEndpoint') -DaysBack 1
         $csv = Import-Csv (Join-Path (Get-SampleDir $root) 'DLPEndpoint.csv')
@@ -273,11 +257,13 @@ Describe 'S2 - per-day budget: every day represented, early flood capped (integr
         # Truncation (added, not replacing the above): only the flooded early day is truncated, at
         # its budget; the complete mid/late days are not.
         $sum = Import-Csv (Join-Path (Get-SampleDir $root) '_AuditSampleSummary.csv')
-        ($sum | Where-Object { $_.Truncated -eq 'True' }).Count       | Should -Be 1
+        # @(...) around Where-Object: under WinPS 5.1 a single PSCustomObject has no
+        # intrinsic .Count (returns $null); PS Core added it in 6.1.
+        @($sum | Where-Object { $_.Truncated -eq 'True' }).Count       | Should -Be 1
         $truncRow = $sum | Where-Object { $_.Truncated -eq 'True' }
         $truncRow.TruncationReason | Should -Be 'MaxPerDay'
         $truncRow.Retrieved        | Should -Be 4
-        ($sum | Where-Object { $_.TruncationReason -eq 'none' }).Count | Should -Be 2
+        @($sum | Where-Object { $_.TruncationReason -eq 'none' }).Count | Should -Be 2
     }
 }
 

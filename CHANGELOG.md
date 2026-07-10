@@ -11,12 +11,25 @@
   `_manifest.csv` rows collected so far and closes the transcript. Previously a mid-run
   terminating error lost the manifest entirely and left the transcript running,
   silently capturing the rest of the console session.
+- **The test suite runs under both Windows PowerShell 5.1 and PowerShell 7** (D8). Fixed
+  three 5.1 breaks: a multi-argument `Join-Path` (PS 6.2+ only), a `$PSScriptRoot`
+  parameter default in `Invoke-Tests.ps1` (empty when evaluated in a param default under
+  5.1), and a `.Count` on a single `PSCustomObject` (5.1 lacks the intrinsic member that
+  PS Core added in 6.1). Stale test comments corrected (`MaxPerType` -> `MaxPerDay`; the
+  dedup test title now names the HashSet implementation, not `Sort-Object`).
 
 ### Added
 - Offline Pester tests for the report writer (`tests/New-PurviewReport.Tests.ps1`):
   non-ASCII tenant data survives into the HTML, and the file carries no byte order mark.
 - Crash-safety test (`tests/Invoke-PurviewSourceDiscovery.Tests.ps1`): a simulated
   mid-run terminating failure still yields `_manifest.csv` and a closed transcript.
+- **Generalized read-only AST guard** (`tests/ReadOnlyInvariant.Tests.ps1`) covering all
+  four scripts: no tenant-mutating cmdlets; the connect/search/import surface and the
+  `Export-*` surface are pinned to the known cmdlet sets. Replaces the former C-only
+  guard inside the audit-sample suite.
+- **`Export-Artifact` status-path characterization tests**: Success / Empty /
+  CmdletNotAvailable / Failed each produce the correct manifest row — the semantics the
+  D9 status vocabulary builds on.
 
 ### Removed
 - `examples/sample-report.html` — posture-era sample (pre-refocus; contained "Posture

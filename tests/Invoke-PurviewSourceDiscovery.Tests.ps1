@@ -46,3 +46,49 @@ Describe 'Crash safety - a terminating error mid-run still yields manifest + clo
         (Get-Content $t -Raw) | Should -Match '(?i)transcript end'
     }
 }
+
+Describe 'Export-Artifact status paths (characterization; D9 keeps these statuses)' {
+    BeforeAll {
+        Mock Import-Module {} -ParameterFilter { $Name -eq 'ExchangeOnlineManagement' }
+
+        # Stubs so the wrapper's Get-Command guard resolves these three; the mocks then
+        # drive one status path each. Every other SCC/EXO cmdlet stays absent in this
+        # session, exercising the CmdletNotAvailable path.
+        function Get-Label {}
+        function Get-LabelPolicy {}
+        function Get-AutoSensitivityLabelPolicy {}
+        Mock Get-Label {
+            @([pscustomobject]@{ DisplayName = 'L1'; Name = 'l1'; Guid = 'g-1' },
+              [pscustomobject]@{ DisplayName = 'L2'; Name = 'l2'; Guid = 'g-2' })
+        }
+        Mock Get-LabelPolicy { @() }
+        Mock Get-AutoSensitivityLabelPolicy { throw 'Simulated access denied' }
+
+        $root = Join-Path $TestDrive 'status'
+        & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $root -ReuseExistingSession *> $null
+        $runDir = (Get-ChildItem -Path $root -Directory -Filter 'SourceDiscovery-*' | Select-Object -First 1).FullName
+        $script:Rows = @(Import-Csv (Join-Path $runDir '_manifest.csv'))
+    }
+
+    It 'a cmdlet returning objects records Success with the object count and an artifact file' {
+        $row = $script:Rows | Where-Object { $_.Artifact -eq 'SensitivityLabels' }
+        $row.Status | Should -Be 'Success'
+        $row.Count  | Should -Be 2
+        Test-Path $row.File | Should -BeTrue
+    }
+    It 'a cmdlet returning nothing records Empty with count 0 and no file' {
+        $row = $script:Rows | Where-Object { $_.Artifact -eq 'LabelPolicies' }
+        $row.Status | Should -Be 'Empty'
+        $row.Count  | Should -Be 0
+        $row.File   | Should -BeNullOrEmpty
+    }
+    It 'a throwing cmdlet records Failed with the exception message' {
+        $row = $script:Rows | Where-Object { $_.Artifact -eq 'AutoLabelPolicies' }
+        $row.Status | Should -Match '^Failed: Simulated access denied'
+        $row.Count  | Should -Be 0
+    }
+    It 'an absent cmdlet records CmdletNotAvailable' {
+        $row = $script:Rows | Where-Object { $_.Artifact -eq 'DlpPolicies' }
+        $row.Status | Should -Be 'CmdletNotAvailable'
+    }
+}
