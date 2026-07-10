@@ -2,6 +2,15 @@
 
 ## Unreleased — discovery-refocus batch 1
 
+### Changed
+- **`New-PurviewReport.ps1` writes the report as UTF-8 without BOM** (was ASCII, which
+  replaced non-ASCII tenant data — accented label names, organization names — with `?`).
+  Source files remain ASCII-only; generated output is UTF-8 (`docs/DECISIONS.md` D7).
+
+### Added
+- Offline Pester tests for the report writer (`tests/New-PurviewReport.Tests.ps1`):
+  non-ASCII tenant data survives into the HTML, and the file carries no byte order mark.
+
 ### Removed
 - `examples/sample-report.html` — posture-era sample (pre-refocus; contained "Posture
   Overview" and "Key Observations & Recommendations" content that contradicts the

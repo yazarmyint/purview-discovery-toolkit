@@ -736,7 +736,9 @@ $polishJs
 </html>
 "@
 
-[System.IO.File]::WriteAllText($OutputPath, $html, [System.Text.Encoding]::ASCII)
+# UTF-8 without BOM (DECISIONS.md D7): source stays ASCII, but tenant data in the
+# report (label names, org names) may be non-ASCII and must survive intact.
+[System.IO.File]::WriteAllText($OutputPath, $html, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "Report written: $OutputPath" -ForegroundColor Cyan
 Write-Host ("Inventory: {0} sensitivity labels, {1} DLP policies, {2} retention labels, {3} custom SITs" -f `
     $lblTotal, $dlpTotal, $retTotal, $sitCustom) -ForegroundColor Gray
