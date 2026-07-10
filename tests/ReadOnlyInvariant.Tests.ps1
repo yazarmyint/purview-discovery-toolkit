@@ -10,18 +10,27 @@
 
 BeforeDiscovery {
     $repoRoot = Split-Path $PSScriptRoot -Parent
-    $scriptFiles = Get-ChildItem -Path (Join-Path $repoRoot 'scripts') -Filter '*.ps1' |
-        ForEach-Object { @{ Name = $_.Name; Path = $_.FullName } }
+    $files = @(Get-ChildItem -Path (Join-Path $repoRoot 'scripts') -File |
+        Where-Object { $_.Extension -in @('.ps1', '.psm1') })
+    # Functions the toolkit defines anywhere under scripts/ (including the shared module)
+    # are toolkit code, not tenant cmdlets: exempt them from every rule. Their bodies are
+    # still scanned when their own file is checked.
+    $toolkitFunctions = @(foreach ($f in $files) {
+        $fAst = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
+        $fAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+            ForEach-Object { $_.Name }
+    })
+    $scriptFiles = @($files | ForEach-Object {
+        @{ Name = $_.Name; Path = $_.FullName; ToolkitFunctions = $toolkitFunctions }
+    })
 }
 
 Describe 'Read-only invariant (static AST guard): <Name>' -ForEach $scriptFiles {
     BeforeAll {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
-        $localFunctions = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
-            ForEach-Object { $_.Name }
         $script:CmdNames = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
             ForEach-Object { $_.GetCommandName() } |
-            Where-Object { $_ -and ($_ -notin $localFunctions) } |
+            Where-Object { $_ -and ($_ -notin $ToolkitFunctions) } |
             Select-Object -Unique
     }
 
