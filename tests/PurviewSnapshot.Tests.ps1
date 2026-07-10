@@ -142,3 +142,119 @@ Describe 'Connect-PurviewSnapshotSession' {
         { Connect-PurviewSnapshotSession -UserPrincipalName 'x@y.example' -ReuseExistingSession } | Should -Not -Throw
     }
 }
+
+Describe 'Get-PurviewSnapshotDocument + canonical serialization (D9 diff-readiness)' {
+    BeforeAll {
+        function New-FixedProvenance {
+            $t0 = New-Object datetime 2026, 7, 10, 12, 0, 0, ([System.DateTimeKind]::Utc)
+            Get-SnapshotProvenance -UserPrincipalName 'op@contoso.example' `
+                -Parameters @{ OutputRoot = 'C:\x'; ReuseExistingSession = ([switch]$true) } `
+                -StartedUtc $t0 -EndedUtc ($t0.AddMinutes(5)) -ScriptName 'Test.ps1' -Outcome 'Completed'
+        }
+    }
+    It 'document carries schemaVersion, provenance, volatile register and areas' {
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-FixedProvenance) -Areas @(
+            (Get-SnapshotArea -Area 'T.One' -Collect { @([pscustomobject]@{ Guid = 'g'; Name = 'n' }) }))
+        $doc.schemaVersion | Should -Be '1.0-draft'
+        $doc.provenance.userPrincipalName | Should -Be 'op@contoso.example'
+        @($doc.volatileFields).Count | Should -BeGreaterThan 0
+        @($doc.areas).Count | Should -Be 1
+    }
+    It 'empty and denied areas still serialize as full envelopes' {
+        $areas = @(
+            (Get-SnapshotArea -Area 'T.Empty' -Collect { @() }),
+            (Get-SnapshotArea -Area 'T.Denied' -Collect { throw 'Access is denied.' })
+        )
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-FixedProvenance) -Areas $areas
+        $json = ConvertTo-CanonicalSnapshotJson -Document $doc
+        $json | Should -Match '"T\.Empty"'
+        $json | Should -Match '"T\.Denied"'
+        $json | Should -Match '"AccessDenied"'
+    }
+    It '1-item areas serialize objects as a 1-element ARRAY; 0-item as an empty array' {
+        $areas = @(
+            (Get-SnapshotArea -Area 'T.Single' -Collect { ,([pscustomobject]@{ Name = 'only' }) }),
+            (Get-SnapshotArea -Area 'T.None' -Collect { @() })
+        )
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-FixedProvenance) -Areas $areas
+        $json = ConvertTo-CanonicalSnapshotJson -Document $doc
+        $m = [regex]::Matches($json, '"objects":\s*(\S)')
+        $m.Count | Should -Be 2
+        foreach ($x in $m) { $x.Groups[1].Value | Should -Be '[' }
+    }
+    It 'serialization is byte-identical across two writes of the same in-memory document' {
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-FixedProvenance) -Areas @(
+            (Get-SnapshotArea -Area 'T.One' -Collect { @([pscustomobject]@{ Guid = 'b' }, [pscustomobject]@{ Guid = 'a' }) }))
+        $p1 = Join-Path $TestDrive 'snap1.json'
+        $p2 = Join-Path $TestDrive 'snap2.json'
+        Write-PurviewSnapshot -Document $doc -Path $p1
+        Write-PurviewSnapshot -Document $doc -Path $p2
+        (Get-FileHash $p1).Hash | Should -Be (Get-FileHash $p2).Hash
+    }
+    It 'snapshot files are UTF-8 without a byte order mark' {
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-FixedProvenance) -Areas @()
+        $p = Join-Path $TestDrive 'snap-bom.json'
+        Write-PurviewSnapshot -Document $doc -Path $p
+        $bytes = [System.IO.File]::ReadAllBytes($p)
+        $bytes[0] | Should -Be 0x7B
+    }
+}
+
+Describe 'Get-SnapshotProvenance' {
+    It 'carries UPN, versions, engine, sorted typed parameters, ISO-8601 UTC timestamps, outcome' {
+        $t0 = New-Object datetime 2026, 7, 10, 12, 0, 0, ([System.DateTimeKind]::Utc)
+        $prov = Get-SnapshotProvenance -UserPrincipalName 'op@contoso.example' `
+            -Parameters @{ Zeta = 'z'; Alpha = 1; Flag = ([switch]$true) } `
+            -StartedUtc $t0 -EndedUtc ($t0.AddMinutes(1)) -ScriptName 'X.ps1' -Outcome 'Aborted'
+        $prov.tool              | Should -Be 'purview-discovery-toolkit'
+        $prov.toolVersion       | Should -Not -BeNullOrEmpty
+        $prov.userPrincipalName | Should -Be 'op@contoso.example'
+        $prov.script            | Should -Be 'X.ps1'
+        $prov.outcome           | Should -Be 'Aborted'
+        $prov.startedUtc | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$'
+        $prov.endedUtc   | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$'
+        @($prov.parameters.Keys) | Should -Be @('Alpha', 'Flag', 'Zeta')
+        $prov.parameters['Flag'] | Should -BeOfType [bool]
+        $prov.powerShell.edition | Should -Not -BeNullOrEmpty
+    }
+    It 'projects tenant identity from Get-ConnectionInformation, excluding volatile token fields' {
+        function global:Get-ConnectionInformation {
+            [pscustomobject]@{
+                UserPrincipalName = 'op@contoso.example'
+                TenantID          = '00000000-0000-0000-0000-000000000001'
+                Organization      = 'contoso.example'
+                State             = 'Connected'
+                TokenExpiryTimeUTC = (Get-Date)
+            }
+        }
+        try {
+            $prov = Get-SnapshotProvenance -UserPrincipalName 'op@contoso.example' -Parameters @{} `
+                -StartedUtc (Get-Date).ToUniversalTime() -EndedUtc (Get-Date).ToUniversalTime()
+            @($prov.connections).Count | Should -Be 1
+            @($prov.connections)[0].TenantID | Should -Be '00000000-0000-0000-0000-000000000001'
+            @(@($prov.connections)[0].PSObject.Properties | ForEach-Object { $_.Name }) | Should -Not -Contain 'TokenExpiryTimeUTC'
+        } finally {
+            Remove-Item -Path 'function:Get-ConnectionInformation' -Force -ErrorAction SilentlyContinue
+        }
+    }
+    It 'tolerates Get-ConnectionInformation being absent or unconnected (offline)' {
+        $prov = Get-SnapshotProvenance -UserPrincipalName 'x@y.example' -Parameters @{} `
+            -StartedUtc (Get-Date).ToUniversalTime() -EndedUtc (Get-Date).ToUniversalTime()
+        @($prov.connections).Count | Should -Be 0
+    }
+}
+
+Describe 'Write-SnapshotManifestCsv (status view)' {
+    It 'writes one row per area with the envelope status columns' {
+        $areas = @(
+            (Get-SnapshotArea -Area 'T.A' -Cmdlet 'Get-X' -Collect { @() }),
+            (Get-SnapshotArea -Area 'T.B' -Skip -SkipReason 'switch not set')
+        )
+        $p = Join-Path $TestDrive 'manifest.csv'
+        Write-SnapshotManifestCsv -Areas $areas -Path $p
+        $rows = @(Import-Csv $p)
+        $rows.Count | Should -Be 2
+        ($rows | Where-Object { $_.Area -eq 'T.A' }).Status | Should -Be 'Empty'
+        ($rows | Where-Object { $_.Area -eq 'T.B' }).Status | Should -Be 'NotAttempted'
+    }
+}

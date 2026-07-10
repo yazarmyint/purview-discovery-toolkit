@@ -197,3 +197,113 @@ function Get-SnapshotArea {
         objects      = @($objects)
     }
 }
+
+function Get-SnapshotProvenance {
+    <# Builds the provenance block (D9): who ran what, with which tool/module/engine
+       versions and parameters, against which tenant, over which UTC window, and how
+       the run ended. Tenant identity comes from Get-ConnectionInformation when the
+       session offers it; volatile token fields are never projected. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [System.Collections.IDictionary]$Parameters = @{},
+        [Parameter(Mandatory)][datetime]$StartedUtc,
+        [Parameter(Mandatory)][datetime]$EndedUtc,
+        [string]$ScriptName = '',
+        [string]$SnapshotLabel = '',
+        [ValidateSet('Completed', 'Aborted')][string]$Outcome = 'Completed'
+    )
+    $params = [ordered]@{}
+    foreach ($k in (@($Parameters.Keys) | Sort-Object)) {
+        $v = $Parameters[$k]
+        if ($v -is [System.Management.Automation.SwitchParameter]) { $params[$k] = [bool]$v }
+        elseif ($v -is [bool] -or $v -is [int] -or $v -is [long] -or $v -is [double]) { $params[$k] = $v }
+        elseif ($v -is [array]) { $params[$k] = @(@($v) | ForEach-Object { "$_" }) }
+        else { $params[$k] = "$v" }
+    }
+    $connections = @()
+    try {
+        if (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue) {
+            foreach ($c in @(Get-ConnectionInformation)) {
+                if ($null -eq $c) { continue }
+                $ci = [ordered]@{}
+                foreach ($n in @('UserPrincipalName', 'TenantID', 'Organization', 'ConnectionUri', 'State', 'IsEopSession')) {
+                    if ($c.PSObject.Properties[$n]) { $ci[$n] = "$($c.$n)" }
+                }
+                $connections += [pscustomobject]$ci
+            }
+        }
+    } catch { }
+    $exoVersion = $null
+    try { $m = @(Get-Module ExchangeOnlineManagement); if (@($m).Count -gt 0) { $exoVersion = "$($m[0].Version)" } } catch { }
+    [pscustomobject][ordered]@{
+        tool              = $script:SnapshotToolName
+        toolVersion       = $script:SnapshotToolVersion
+        script            = $ScriptName
+        userPrincipalName = $UserPrincipalName
+        snapshotLabel     = $SnapshotLabel
+        parameters        = $params
+        connections       = @($connections)
+        moduleVersions    = [pscustomobject][ordered]@{ ExchangeOnlineManagement = $exoVersion }
+        powerShell        = [pscustomobject][ordered]@{ edition = "$($PSVersionTable.PSEdition)"; version = "$($PSVersionTable.PSVersion)" }
+        startedUtc        = $StartedUtc.ToUniversalTime().ToString('o')
+        endedUtc          = $EndedUtc.ToUniversalTime().ToString('o')
+        outcome           = $Outcome
+    }
+}
+
+function Get-PurviewSnapshotDocument {
+    <# Assembles the canonical snapshot document (D9): schemaVersion + provenance +
+       the embedded volatile-field register + the per-area envelopes. This document
+       is the single source of truth; CSVs and reports derive from it. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Provenance,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Areas
+    )
+    [pscustomobject][ordered]@{
+        schemaVersion  = $script:SnapshotSchemaVersion
+        provenance     = $Provenance
+        volatileFields = @($script:VolatileFieldRegister)
+        areas          = @($Areas)
+    }
+}
+
+function ConvertTo-CanonicalSnapshotJson {
+    <# Canonical serialization: -InputObject (never the pipeline, which unwraps
+       1-element arrays) so every collection - including 1-item and 0-item object
+       sets - serializes as a JSON array. Property order is construction order
+       ([ordered] throughout); object order is the stable-key sort. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Document, [int]$Depth = 12)
+    ConvertTo-Json -InputObject $Document -Depth $Depth
+}
+
+function Write-PurviewSnapshot {
+    <# Writes the snapshot as UTF-8 without BOM (D7). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Document, [Parameter(Mandatory)][string]$Path)
+    $json = ConvertTo-CanonicalSnapshotJson -Document $Document
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Write-SnapshotManifestCsv {
+    <# Human-scannable status view of the envelopes (one row per area). A derived
+       view: snapshot.json remains the source of truth. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Areas,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $rows = @(foreach ($a in @($Areas)) {
+        [pscustomobject][ordered]@{
+            Area       = $a.area
+            Cmdlets    = (@($a.cmdlets) -join '; ')
+            Status     = $a.status
+            Count      = $a.count
+            Error      = $a.error
+            DurationMs = $a.durationMs
+        }
+    })
+    if (@($rows).Count -gt 0) { $rows | Export-Csv -Path $Path -NoTypeInformation -Encoding utf8 }
+}
