@@ -29,6 +29,10 @@ Start-Transcript -Path (Join-Path $runDir '_transcript.log') -Force | Out-Null
 $script:Manifest = [System.Collections.Generic.List[object]]::new()
 Write-Host "Output: $runDir" -ForegroundColor Cyan
 
+# Everything below runs inside try/finally: on ANY terminating error the manifest rows
+# collected so far are still written and the transcript is closed (finally block at EOF).
+try {
+
 # --- Connect ---------------------------------------------------------------
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
 if (-not $ReuseExistingSession) {
@@ -233,8 +237,16 @@ if ($IncludePurviewConfigZip -and (Get-Command Export-PurviewConfig -ErrorAction
     } catch { Write-Warning "Export-PurviewConfig failed: $($_.Exception.Message)" }
 }
 
-# --- Manifest + close ------------------------------------------------------
-$script:Manifest | Export-Csv (Join-Path $runDir '_manifest.csv') -NoTypeInformation -Encoding utf8
+# --- Summary ----------------------------------------------------------------
 $script:Manifest | Format-Table Area,Artifact,Status,Count -AutoSize
 Write-Host "`nDiscovery complete. Manifest: $(Join-Path $runDir '_manifest.csv')" -ForegroundColor Cyan
-Stop-Transcript | Out-Null
+
+} finally {
+    # Crash safety: whatever was collected is persisted and the transcript is closed
+    # even when a terminating error aborts the run mid-way.
+    if ($script:Manifest.Count -gt 0) {
+        try { $script:Manifest | Export-Csv (Join-Path $runDir '_manifest.csv') -NoTypeInformation -Encoding utf8 }
+        catch { Write-Warning "Manifest write failed: $($_.Exception.Message)" }
+    }
+    try { Stop-Transcript | Out-Null } catch { }
+}

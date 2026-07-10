@@ -6,10 +6,17 @@
 - **`New-PurviewReport.ps1` writes the report as UTF-8 without BOM** (was ASCII, which
   replaced non-ASCII tenant data — accented label names, organization names — with `?`).
   Source files remain ASCII-only; generated output is UTF-8 (`docs/DECISIONS.md` D7).
+- **`Invoke-PurviewSourceDiscovery.ps1` guarantees the manifest and transcript on failure.**
+  The run body is wrapped in `try/finally`: any terminating error still writes the
+  `_manifest.csv` rows collected so far and closes the transcript. Previously a mid-run
+  terminating error lost the manifest entirely and left the transcript running,
+  silently capturing the rest of the console session.
 
 ### Added
 - Offline Pester tests for the report writer (`tests/New-PurviewReport.Tests.ps1`):
   non-ASCII tenant data survives into the HTML, and the file carries no byte order mark.
+- Crash-safety test (`tests/Invoke-PurviewSourceDiscovery.Tests.ps1`): a simulated
+  mid-run terminating failure still yields `_manifest.csv` and a closed transcript.
 
 ### Removed
 - `examples/sample-report.html` — posture-era sample (pre-refocus; contained "Posture
