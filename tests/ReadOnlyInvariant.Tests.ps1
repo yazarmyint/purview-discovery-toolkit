@@ -53,8 +53,10 @@ Describe 'Read-only invariant (static AST guard): <Name>' -ForEach $scriptFiles 
     }
 
     It 'export surface is exactly the known set (tenant reads + local serialization)' {
+        # Export-Clixml is deliberately NOT allowed (removed per D10); reintroducing it
+        # fails this test.
         $allowed = @('Export-ContentExplorerData', 'Export-PurviewConfig',   # tenant read/export (D5/D6)
-                     'Export-Csv', 'Export-Clixml')                          # local files
+                     'Export-Csv')                                           # local files
         $surface = $script:CmdNames | Where-Object { $_ -match '^Export-' }
         foreach ($c in $surface) { $c | Should -BeIn $allowed }
     }

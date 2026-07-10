@@ -1,14 +1,19 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Source tenant Microsoft Purview configuration discovery export.
-    Exports Information Protection, Classification, DLP, Data Lifecycle and Records
-    configuration to JSON (fidelity) + CLIXML (re-import) + summary CSV (review),
-    with a manifest and transcript. Resilient: missing cmdlets / empty results are
-    logged and skipped, never fatal.
+    Point-in-time Microsoft Purview configuration snapshot. Enumerates Information
+    Protection, Classification, DLP, Data Lifecycle / Records and Audit configuration
+    read-only and writes ONE schema-versioned snapshot.json (the source of truth),
+    plus sidecar files for large XML/ZIP artifacts and a _manifest.csv status view.
 .NOTES
     Connects to BOTH Security & Compliance PowerShell (IPPS) and Exchange Online (EXO).
-    Read-only: issues only Get-* / Export-* cmdlets. Run against the SOURCE tenant.
+    Read-only: issues only Get-* / Export-* cmdlets.
+
+    Every area records a durable status - Success | Empty | AccessDenied |
+    CmdletNotAvailable | Failed | NotAttempted (DECISIONS.md D9) - so an absent
+    cmdlet, a permissions gap or a failure is never silent. Snapshot shape,
+    stable-key ordering and the volatile-field register are documented in
+    docs/SNAPSHOT-SCHEMA.md.
 #>
 [CmdletBinding()]
 param(
@@ -17,236 +22,178 @@ param(
     [switch]$IncludePurviewConfigZip,
     [switch]$ReuseExistingSession
 )
-
 $ErrorActionPreference = 'Stop'
-function Get-SafeName([string]$n){ if([string]::IsNullOrWhiteSpace($n)){'unnamed'}else{($n -replace '[\\/:*?"<>|]','_').Trim()} }
+Import-Module (Join-Path $PSScriptRoot 'PurviewSnapshot.psm1') -Force
 
-# --- Output scaffold -------------------------------------------------------
-$stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
-$runDir = Join-Path $OutputRoot "SourceDiscovery-$stamp"
+# --- Run scaffold (UTC stamps; D9) ------------------------------------------
+$startedUtc = (Get-Date).ToUniversalTime()
+$runDir = Join-Path $OutputRoot ("SourceDiscovery-" + $startedUtc.ToString('yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 Start-Transcript -Path (Join-Path $runDir '_transcript.log') -Force | Out-Null
-$script:Manifest = [System.Collections.Generic.List[object]]::new()
+$script:Areas = [System.Collections.Generic.List[object]]::new()
+$script:RunCompleted = $false
+$script:SidecarRoot = Join-Path $runDir 'sidecars'
 Write-Host "Output: $runDir" -ForegroundColor Cyan
 
-# Everything below runs inside try/finally: on ANY terminating error the manifest rows
-# collected so far are still written and the transcript is closed (finally block at EOF).
+# Writes one sidecar file and returns its snapshot reference (relative path with
+# forward slashes). Called from -Process blocks, so a write failure classifies into
+# that area's status instead of dying silently.
+function Write-SidecarFile([string]$AreaName, [string]$FileName, [string]$Content) {
+    $dir = Join-Path $script:SidecarRoot $AreaName
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $dir $FileName), $Content, (New-Object System.Text.UTF8Encoding $false))
+    "sidecars/$AreaName/$FileName"
+}
+
+# Registers an envelope and prints its one-line outcome.
+function Trace-Area($Envelope) {
+    $script:Areas.Add($Envelope)
+    $color = switch ($Envelope.status) {
+        'Success'      { 'Green' }
+        'Empty'        { 'DarkGray' }
+        'NotAttempted' { 'DarkGray' }
+        default        { 'Yellow' }
+    }
+    $suffix = if ($Envelope.error) { " ($($Envelope.error))" } else { '' }
+    Write-Host "[$($Envelope.status)] $($Envelope.area): $($Envelope.count)$suffix" -ForegroundColor $color
+}
+
+# Everything below runs inside try/finally: on ANY terminating error the snapshot
+# (areas collected so far, outcome Aborted), the manifest view and the transcript
+# are still produced (finally block at EOF).
 try {
 
-# --- Connect ---------------------------------------------------------------
-Import-Module ExchangeOnlineManagement -ErrorAction Stop
-if (-not $ReuseExistingSession) {
-    Write-Host "Connecting to Security & Compliance PowerShell (sign in as $SourceUpn)..." -ForegroundColor Yellow
-    Connect-IPPSSession -UserPrincipalName $SourceUpn
-    Write-Host "Connecting to Exchange Online (sign in as $SourceUpn)..." -ForegroundColor Yellow
-    Connect-ExchangeOnline -UserPrincipalName $SourceUpn -ShowBanner:$false
-}
+Connect-PurviewSnapshotSession -UserPrincipalName $SourceUpn -ReuseExistingSession:$ReuseExistingSession
 
-# --- Resilient export wrapper ---------------------------------------------
-function Export-Artifact {
-    param(
-        [Parameter(Mandatory)][string]$Area,
-        [Parameter(Mandatory)][string]$Name,
-        [string]$Cmd,
-        [Parameter(Mandatory)][scriptblock]$Get,
-        [object[]]$CsvSelect
-    )
-    $areaDir = Join-Path $runDir $Area
-    New-Item -ItemType Directory -Force -Path $areaDir | Out-Null
-    $base = Join-Path $areaDir (Get-SafeName $Name)
-    $rec  = [ordered]@{ Area=$Area; Artifact=$Name; Cmdlet=$Cmd; Status=$null; Count=0; File=$null; Timestamp=(Get-Date).ToString('o') }
+# === Information Protection ==================================================
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.SensitivityLabels' -Cmdlet 'Get-Label' -Collect { Get-Label })
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.LabelPolicies' -Cmdlet 'Get-LabelPolicy' -Collect { Get-LabelPolicy })
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelPolicies' -Cmdlet 'Get-AutoSensitivityLabelPolicy' -Collect { Get-AutoSensitivityLabelPolicy })
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelRules' -Cmdlet 'Get-AutoSensitivityLabelRule' -Collect { Get-AutoSensitivityLabelRule })
 
-    if ($Cmd -and -not (Get-Command $Cmd -ErrorAction SilentlyContinue)) {
-        $rec.Status = 'CmdletNotAvailable'
-        Write-Warning "[$Area] $Name : cmdlet '$Cmd' not present in this session/SKU - skipped."
-        $script:Manifest.Add([pscustomobject]$rec); return
-    }
-    try {
-        $data  = & $Get
-        $count = @($data).Count
-        $rec.Count = $count
-        if ($count -eq 0) {
-            $rec.Status = 'Empty'
-            Write-Host "[$Area] $Name : 0 objects." -ForegroundColor DarkGray
-        } else {
-            $data | ConvertTo-Json -Depth 12 | Out-File "$base.json" -Encoding utf8
-            $data | Export-Clixml -Path "$base.xml"
-            if ($CsvSelect) { $data | Select-Object $CsvSelect | Export-Csv "$base.csv" -NoTypeInformation -Encoding utf8 }
-            $rec.Status = 'Success'; $rec.File = "$base.json"
-            Write-Host "[$Area] $Name : $count exported." -ForegroundColor Green
-        }
-    } catch {
-        $rec.Status = "Failed: $($_.Exception.Message)"
-        Write-Warning "[$Area] $Name failed: $($_.Exception.Message)"
-    }
-    $script:Manifest.Add([pscustomobject]$rec)
-}
+# === Classification ==========================================================
+Trace-Area (Get-SnapshotArea -Area 'Classification.SensitiveInformationTypes' -Cmdlet 'Get-DlpSensitiveInformationType' -Collect { Get-DlpSensitiveInformationType })
 
-# ===========================================================================
-# 1. INFORMATION PROTECTION
-# ===========================================================================
-Export-Artifact -Area '1-InformationProtection' -Name 'SensitivityLabels' -Cmd 'Get-Label' `
-    -Get { Get-Label } `
-    -CsvSelect @('DisplayName','Name','Guid','Priority','ContentType','Disabled',
-        @{n='ParentLabel';e={$_.ParentLabelDisplayName}},
-        @{n='EncryptionEnabled';e={$_.EncryptionEnabled}},
-        @{n='ContentMarking';e={$_.ApplyContentMarkingHeaderEnabled -or $_.ApplyContentMarkingFooterEnabled -or $_.ApplyWaterMarkingEnabled}})
-
-Export-Artifact -Area '1-InformationProtection' -Name 'LabelPolicies' -Cmd 'Get-LabelPolicy' `
-    -Get { Get-LabelPolicy } `
-    -CsvSelect @('Name','Guid','Mode','Enabled',@{n='Labels';e={($_.Labels -join '; ')}},@{n='Workload';e={$_.Workload}})
-
-Export-Artifact -Area '1-InformationProtection' -Name 'AutoLabelPolicies' -Cmd 'Get-AutoSensitivityLabelPolicy' `
-    -Get { Get-AutoSensitivityLabelPolicy } `
-    -CsvSelect @('Name','Guid','Mode','Enabled','ApplySensitivityLabel',@{n='Workload';e={$_.Workload}})
-
-Export-Artifact -Area '1-InformationProtection' -Name 'AutoLabelRules' -Cmd 'Get-AutoSensitivityLabelRule' `
-    -Get { Get-AutoSensitivityLabelRule } `
-    -CsvSelect @('Name',@{n='Policy';e={$_.ParentPolicyName}},'Disabled',@{n='Workload';e={$_.Workload}})
-
-# ===========================================================================
-# 2. CLASSIFICATION (SITs, EDM, trainable classifiers)
-# ===========================================================================
-# All SITs - flag custom (Publisher not Microsoft) for rationalization
-Export-Artifact -Area '2-Classification' -Name 'SensitiveInfoTypes_All' -Cmd 'Get-DlpSensitiveInformationType' `
-    -Get { Get-DlpSensitiveInformationType } `
-    -CsvSelect @('Name','Id','Type','Publisher','RulePackId',
-        @{n='IsCustom';e={$_.Publisher -ne 'Microsoft Corporation'}})
-
-# Custom SIT rule packages -> raw XML (the actual regex/keyword logic)
-$sitDir = Join-Path $runDir '2-Classification\SIT-RulePackages'
-New-Item -ItemType Directory -Force -Path $sitDir | Out-Null
-if (Get-Command Get-DlpSensitiveInformationTypeRulePackage -ErrorAction SilentlyContinue) {
-    try {
-        $pkgs = Get-DlpSensitiveInformationTypeRulePackage
-        foreach ($p in $pkgs) {
-            $idVal = if ($p.Identity) { $p.Identity } else { $p.Name }
-            $pName = Get-SafeName $idVal
+# SIT rule packages: the serialized rule collection (the regex/keyword logic) goes to
+# XML sidecars; the envelope keeps light descriptors. Per-item extraction failures are
+# noted without failing the area.
+Trace-Area (Get-SnapshotArea -Area 'Classification.SitRulePackages' -Cmdlet 'Get-DlpSensitiveInformationTypeRulePackage' `
+    -Collect { Get-DlpSensitiveInformationTypeRulePackage } `
+    -Process {
+        param($packages)
+        $objects  = [System.Collections.Generic.List[object]]::new()
+        $sidecars = [System.Collections.Generic.List[object]]::new()
+        $notes    = [System.Collections.Generic.List[string]]::new()
+        foreach ($p in @($packages)) {
+            $id = if ($p.PSObject.Properties['Identity'] -and "$($p.Identity)" -ne '') { "$($p.Identity)" }
+                  elseif ($p.PSObject.Properties['Name']) { "$($p.Name)" } else { 'rulepack' }
+            $file = (Get-SafeName $id) + '.xml'
+            $rel = $null
             try {
                 $xml = [System.Text.Encoding]::Unicode.GetString($p.SerializedClassificationRuleCollection)
-                $xml | Out-File (Join-Path $sitDir "$pName.xml") -Encoding utf8
-            } catch { $p | Export-Clixml (Join-Path $sitDir "$pName.xml.clixml") }
+                $rel = Write-SidecarFile 'Classification.SitRulePackages' $file $xml
+                $sidecars.Add([pscustomobject][ordered]@{ name = $file; path = $rel; diffExcluded = $false })
+            } catch { $notes.Add(($id + ': ' + $_.Exception.Message)) }
+            $desc = [ordered]@{ Name = $id; SidecarPath = $rel }
+            foreach ($n in @('RulePackId', 'Publisher', 'Version')) {
+                if ($p.PSObject.Properties[$n]) { $desc[$n] = "$($p.$n)" }
+            }
+            $objects.Add([pscustomobject]$desc)
         }
-        $script:Manifest.Add([pscustomobject]@{Area='2-Classification';Artifact='SIT-RulePackages';Cmdlet='Get-DlpSensitiveInformationTypeRulePackage';Status='Success';Count=@($pkgs).Count;File=$sitDir;Timestamp=(Get-Date).ToString('o')})
-    } catch {
-        $script:Manifest.Add([pscustomobject]@{Area='2-Classification';Artifact='SIT-RulePackages';Cmdlet='Get-DlpSensitiveInformationTypeRulePackage';Status="Failed: $($_.Exception.Message)";Count=0;File=$null;Timestamp=(Get-Date).ToString('o')})
-    }
-}
+        @{ Objects = $objects.ToArray(); Sidecars = $sidecars.ToArray(); Notes = $notes.ToArray() }
+    })
 
-# EDM schemas -> per-schema XML (cannot migrate; this documents what to rebuild)
-$edmDir = Join-Path $runDir '2-Classification\EDM-Schemas'
-New-Item -ItemType Directory -Force -Path $edmDir | Out-Null
-if (Get-Command Get-DlpEdmSchema -ErrorAction SilentlyContinue) {
-    try {
-        $schemas = Get-DlpEdmSchema
-        foreach ($s in $schemas) {
+# EDM schemas: schema XML to sidecars, light descriptors in the envelope.
+Trace-Area (Get-SnapshotArea -Area 'Classification.EdmSchemas' -Cmdlet 'Get-DlpEdmSchema' `
+    -Collect { Get-DlpEdmSchema } `
+    -Process {
+        param($schemas)
+        $objects  = [System.Collections.Generic.List[object]]::new()
+        $sidecars = [System.Collections.Generic.List[object]]::new()
+        $notes    = [System.Collections.Generic.List[string]]::new()
+        foreach ($s in @($schemas)) {
+            $id = "$($s.Identity)"
+            $file = (Get-SafeName $id) + '.xml'
+            $rel = $null
             try {
                 $detail = Get-DlpEdmSchema -Identity $s.Identity
-                $detail.EdmSchemaXML | Set-Content -Path (Join-Path $edmDir ((Get-SafeName $s.Identity) + '.xml'))
-            } catch { Write-Warning "EDM schema '$($s.Identity)' XML export failed: $($_.Exception.Message)" }
+                $rel = Write-SidecarFile 'Classification.EdmSchemas' $file "$($detail.EdmSchemaXML)"
+                $sidecars.Add([pscustomobject][ordered]@{ name = $file; path = $rel; diffExcluded = $false })
+            } catch { $notes.Add(($id + ': ' + $_.Exception.Message)) }
+            $objects.Add([pscustomobject][ordered]@{ Name = $id; SidecarPath = $rel })
         }
-        $script:Manifest.Add([pscustomobject]@{Area='2-Classification';Artifact='EDM-Schemas';Cmdlet='Get-DlpEdmSchema';Status='Success';Count=@($schemas).Count;File=$edmDir;Timestamp=(Get-Date).ToString('o')})
-    } catch {
-        $script:Manifest.Add([pscustomobject]@{Area='2-Classification';Artifact='EDM-Schemas';Cmdlet='Get-DlpEdmSchema';Status="Failed: $($_.Exception.Message)";Count=0;File=$null;Timestamp=(Get-Date).ToString('o')})
-    }
-}
-# NOTE: Custom TRAINABLE CLASSIFIERS have no supported export cmdlet - document manually
-#       from the portal (Data classification > Trainable classifiers). See README.
+        @{ Objects = $objects.ToArray(); Sidecars = $sidecars.ToArray(); Notes = $notes.ToArray() }
+    })
+# NOTE: custom trainable classifiers have no export cmdlet (documented gap; see README).
 
-# ===========================================================================
-# 3. DATA LOSS PREVENTION
-# ===========================================================================
-Export-Artifact -Area '3-DLP' -Name 'DlpPolicies' -Cmd 'Get-DlpCompliancePolicy' `
-    -Get { Get-DlpCompliancePolicy } `
-    -CsvSelect @('Name','Guid','Mode','Enabled',@{n='Workload';e={$_.Workload}},
-        @{n='Exchange';e={[bool]$_.ExchangeLocation}},
-        @{n='SharePoint';e={[bool]$_.SharePointLocation}},
-        @{n='OneDrive';e={[bool]$_.OneDriveLocation}},
-        @{n='Teams';e={[bool]$_.TeamsLocation}},
-        @{n='Endpoint';e={[bool]$_.EndpointDlpLocation}})
+# === Data Loss Prevention ====================================================
+Trace-Area (Get-SnapshotArea -Area 'Dlp.Policies' -Cmdlet 'Get-DlpCompliancePolicy' -Collect { Get-DlpCompliancePolicy })
+Trace-Area (Get-SnapshotArea -Area 'Dlp.Rules' -Cmdlet 'Get-DlpComplianceRule' -Collect { Get-DlpComplianceRule })
+Trace-Area (Get-SnapshotArea -Area 'Dlp.EndpointGlobalSettings' -Cmdlet 'Get-PolicyConfig' -Collect { Get-PolicyConfig })
 
-Export-Artifact -Area '3-DLP' -Name 'DlpRules' -Cmd 'Get-DlpComplianceRule' `
-    -Get { Get-DlpComplianceRule } `
-    -CsvSelect @('Name',@{n='Policy';e={$_.ParentPolicyName}},'Disabled','BlockAccess','BlockAccessScope',
-        'GenerateAlert','GenerateIncidentReport',
-        @{n='NotifyUser';e={($_.NotifyUser -join '; ')}},
-        @{n='HasUserOverride';e={[bool]$_.NotifyAllowOverride}},
-        @{n='Override';e={($_.NotifyAllowOverride -join '; ')}},
-        'ReportSeverityLevel')
+# === Data Lifecycle & Records ================================================
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Labels' -Cmdlet 'Get-ComplianceTag' -Collect { Get-ComplianceTag })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Policies' -Cmdlet 'Get-RetentionCompliancePolicy' -Collect { Get-RetentionCompliancePolicy -DistributionDetail })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Rules' -Cmdlet 'Get-RetentionComplianceRule' -Collect { Get-RetentionComplianceRule })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.EventTypes' -Cmdlet 'Get-ComplianceRetentionEventType' -Collect { Get-ComplianceRetentionEventType })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.AdaptiveScopes' -Cmdlet 'Get-AdaptiveScope' -Collect { Get-AdaptiveScope })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanAuthorities' -Cmdlet 'Get-FilePlanPropertyAuthority' -Collect { Get-FilePlanPropertyAuthority })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanCategories' -Cmdlet 'Get-FilePlanPropertyCategory' -Collect { Get-FilePlanPropertyCategory })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanSubCategories' -Cmdlet 'Get-FilePlanPropertySubCategory' -Collect { Get-FilePlanPropertySubCategory })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanCitations' -Cmdlet 'Get-FilePlanPropertyCitation' -Collect { Get-FilePlanPropertyCitation })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanDepartments' -Cmdlet 'Get-FilePlanPropertyDepartment' -Collect { Get-FilePlanPropertyDepartment })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanReferenceIds' -Cmdlet 'Get-FilePlanPropertyReferenceId' -Collect { Get-FilePlanPropertyReferenceId })
 
-# Endpoint DLP global settings (restricted apps/browsers/USB/printer/network share groups)
-Export-Artifact -Area '3-DLP' -Name 'EndpointDlpGlobalSettings' -Cmd 'Get-PolicyConfig' `
-    -Get { Get-PolicyConfig }
+# === Audit configuration =====================================================
+Trace-Area (Get-SnapshotArea -Area 'Audit.UnifiedAuditIngestion' -Cmdlet 'Get-AdminAuditLogConfig' -Collect { Get-AdminAuditLogConfig })
+Trace-Area (Get-SnapshotArea -Area 'Audit.LogRetentionPolicies' -Cmdlet 'Get-UnifiedAuditLogRetentionPolicy' -Collect { Get-UnifiedAuditLogRetentionPolicy })
+# Full Exchange organization configuration: captured for reference, excluded from the
+# diff guarantees (large, and many operational fields move without configuration
+# intent) - see the volatile-field register.
+Trace-Area (Get-SnapshotArea -Area 'Audit.OrganizationConfig' -Cmdlet 'Get-OrganizationConfig' -DiffExcluded -Collect { Get-OrganizationConfig })
 
-# ===========================================================================
-# 4. DATA LIFECYCLE & RECORDS MANAGEMENT
-# ===========================================================================
-Export-Artifact -Area '4-Retention-Records' -Name 'RetentionLabels' -Cmd 'Get-ComplianceTag' `
-    -Get { Get-ComplianceTag } `
-    -CsvSelect @('Name','Guid','RetentionAction','RetentionDuration','RetentionType',
-        'IsRecordLabel','Regulatory','HasRetentionAction','Notes',
-        @{n='FilePlan';e={if($_.FilePlanMetadata){'yes'}else{'no'}}})
+# === Diagnostics (opt-in, out-of-band corroborating evidence; D5/D6) =========
+Trace-Area (Get-SnapshotArea -Area 'Diagnostics.PurviewConfigZip' -Cmdlet 'Export-PurviewConfig' -DiffExcluded `
+    -Skip:(-not $IncludePurviewConfigZip) -SkipReason 'IncludePurviewConfigZip not set' `
+    -Collect {
+        # The ZIP arrives as byte[]; hold it in a property so the pipeline cannot
+        # enumerate it byte-by-byte.
+        [pscustomobject]@{ Bytes = (Export-PurviewConfig -Components DLP, MIPLabels, ClassificationAndTextExtraction, DLM) }
+    } `
+    -Process {
+        param($results)
+        $bytes = $results[0].Bytes
+        $dir = Join-Path $script:SidecarRoot 'Diagnostics.PurviewConfigZip'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'PurviewConfig.zip'), $bytes)
+        $rel = 'sidecars/Diagnostics.PurviewConfigZip/PurviewConfig.zip'
+        @{
+            Objects  = @([pscustomobject][ordered]@{ Name = 'PurviewConfig.zip'; SidecarPath = $rel; SizeBytes = $bytes.Length })
+            Sidecars = @([pscustomobject][ordered]@{ name = 'PurviewConfig.zip'; path = $rel; diffExcluded = $true })
+        }
+    })
 
-Export-Artifact -Area '4-Retention-Records' -Name 'RetentionPolicies' -Cmd 'Get-RetentionCompliancePolicy' `
-    -Get { Get-RetentionCompliancePolicy -DistributionDetail } `
-    -CsvSelect @('Name','Guid','Mode','Enabled',@{n='Workload';e={$_.Workload}},
-        @{n='ScopeType';e={if($_.IsAdaptiveScopePolicy){'Adaptive'}else{'Static'}}},
-        'RestrictiveRetention')
+$script:RunCompleted = $true
 
-Export-Artifact -Area '4-Retention-Records' -Name 'RetentionRules' -Cmd 'Get-RetentionComplianceRule' `
-    -Get { Get-RetentionComplianceRule } `
-    -CsvSelect @('Name',@{n='Policy';e={$_.Policy}},'RetentionDuration','RetentionComplianceAction','ExpirationDateOption')
-
-Export-Artifact -Area '4-Retention-Records' -Name 'RetentionEventTypes' -Cmd 'Get-ComplianceRetentionEventType' `
-    -Get { Get-ComplianceRetentionEventType } -CsvSelect @('Name','Guid')
-
-# Adaptive scopes (cmdlet may be absent on older modules - wrapper guards it)
-Export-Artifact -Area '4-Retention-Records' -Name 'AdaptiveScopes' -Cmd 'Get-AdaptiveScope' `
-    -Get { Get-AdaptiveScope } -CsvSelect @('Name','Guid','LocationType','Mode')
-
-# File plan descriptors
-foreach ($fp in 'Authority','Category','SubCategory','Citation','Department','ReferenceId') {
-    Export-Artifact -Area '4-Retention-Records' -Name "FilePlan_$fp" -Cmd "Get-FilePlanProperty$fp" `
-        -Get ([scriptblock]::Create("Get-FilePlanProperty$fp")) -CsvSelect @('Name','Guid')
-}
-
-# ===========================================================================
-# 5. AUDIT CONFIGURATION (EXO) + AUDIT RETENTION POLICIES (IPPS)
-# ===========================================================================
-Export-Artifact -Area '5-Audit' -Name 'UnifiedAuditIngestionStatus' -Cmd 'Get-AdminAuditLogConfig' `
-    -Get { Get-AdminAuditLogConfig | Select-Object UnifiedAuditLogIngestionEnabled,AdminAuditLogEnabled } `
-    -CsvSelect @('UnifiedAuditLogIngestionEnabled','AdminAuditLogEnabled')
-
-Export-Artifact -Area '5-Audit' -Name 'AuditLogRetentionPolicies' -Cmd 'Get-UnifiedAuditLogRetentionPolicy' `
-    -Get { Get-UnifiedAuditLogRetentionPolicy } `
-    -CsvSelect @('Name','Priority','RecordTypes','Operations','UserIds','RetentionDuration')
-
-Export-Artifact -Area '5-Audit' -Name 'OrganizationConfig' -Cmd 'Get-OrganizationConfig' `
-    -Get { Get-OrganizationConfig }
-
-# ===========================================================================
-# 6. BONUS - one-shot Purview diagnostic config ZIP (newer tenants only)
-# ===========================================================================
-if ($IncludePurviewConfigZip -and (Get-Command Export-PurviewConfig -ErrorAction SilentlyContinue)) {
-    try {
-        $zip = Export-PurviewConfig -Components DLP,MIPLabels,ClassificationAndTextExtraction,DLM
-        $zipPath = Join-Path $runDir '6-PurviewConfigDiagnostic.zip'
-        [IO.File]::WriteAllBytes($zipPath, $zip)
-        Write-Host "Export-PurviewConfig ZIP saved: $zipPath" -ForegroundColor Green
-        $script:Manifest.Add([pscustomobject]@{Area='6-Diagnostic';Artifact='Export-PurviewConfig';Cmdlet='Export-PurviewConfig';Status='Success';Count=1;File=$zipPath;Timestamp=(Get-Date).ToString('o')})
-    } catch { Write-Warning "Export-PurviewConfig failed: $($_.Exception.Message)" }
-}
-
-# --- Summary ----------------------------------------------------------------
-$script:Manifest | Format-Table Area,Artifact,Status,Count -AutoSize
-Write-Host "`nDiscovery complete. Manifest: $(Join-Path $runDir '_manifest.csv')" -ForegroundColor Cyan
+# --- Console summary ----------------------------------------------------------
+$script:Areas | Select-Object area, status, count | Format-Table -AutoSize
+Write-Host "Snapshot run complete." -ForegroundColor Cyan
 
 } finally {
-    # Crash safety: whatever was collected is persisted and the transcript is closed
-    # even when a terminating error aborts the run mid-way.
-    if ($script:Manifest.Count -gt 0) {
-        try { $script:Manifest | Export-Csv (Join-Path $runDir '_manifest.csv') -NoTypeInformation -Encoding utf8 }
-        catch { Write-Warning "Manifest write failed: $($_.Exception.Message)" }
+    # Crash safety: the snapshot (everything collected so far), the manifest view and
+    # the transcript are produced even when a terminating error aborts the run.
+    $endedUtc = (Get-Date).ToUniversalTime()
+    $outcome = if ($script:RunCompleted) { 'Completed' } else { 'Aborted' }
+    try {
+        $prov = Get-SnapshotProvenance -UserPrincipalName $SourceUpn -Parameters $PSBoundParameters `
+            -StartedUtc $startedUtc -EndedUtc $endedUtc -ScriptName 'Invoke-PurviewSourceDiscovery.ps1' -Outcome $outcome
+        $doc = Get-PurviewSnapshotDocument -Provenance $prov -Areas @($script:Areas)
+        Write-PurviewSnapshot -Document $doc -Path (Join-Path $runDir 'snapshot.json')
+        Write-Host "Snapshot: $(Join-Path $runDir 'snapshot.json') ($outcome)" -ForegroundColor Cyan
+    } catch { Write-Warning "Snapshot write failed: $($_.Exception.Message)" }
+    if ($script:Areas.Count -gt 0) {
+        try { Write-SnapshotManifestCsv -Areas @($script:Areas) -Path (Join-Path $runDir '_manifest.csv') }
+        catch { Write-Warning "Manifest view write failed: $($_.Exception.Message)" }
     }
     try { Stop-Transcript | Out-Null } catch { }
 }

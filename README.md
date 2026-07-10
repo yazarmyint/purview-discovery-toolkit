@@ -34,7 +34,7 @@ Four scripts. A collects the configuration; B and C collect content and audit de
 
 | # | Script | Purpose | Connects to |
 |---|--------|---------|-------------|
-| A | `Invoke-PurviewSourceDiscovery.ps1` | Export the full Purview config (Information Protection, classification, DLP, data lifecycle/records, audit) of a tenant to JSON + CLIXML + CSV with a manifest | Security & Compliance PowerShell + Exchange Online |
+| A | `Invoke-PurviewSourceDiscovery.ps1` | Snapshot the full Purview config (Information Protection, classification, DLP, data lifecycle/records, audit) of a tenant into one schema-versioned `snapshot.json` (plus XML/ZIP sidecars and a `_manifest.csv` status view) — see `docs/SNAPSHOT-SCHEMA.md` | Security & Compliance PowerShell + Exchange Online |
 | B | `Export-PurviewContentInventory.ps1` | Content Explorer item counts (and optional item-level detail) per SIT / sensitivity label / retention label | Security & Compliance PowerShell |
 | C | `Export-PurviewAuditSample.ps1` | Sample unified-audit-log export for DLP / labeling / disposition activity over a date window | Exchange Online |
 | E | `New-PurviewReport.ps1` | Client-ready, offline HTML report (discovery baseline) from the toolkit output | None (local) |

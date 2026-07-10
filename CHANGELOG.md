@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — discovery-refocus batch 2 (canonical snapshot model)
+
+### Added
+- **`scripts/PurviewSnapshot.psm1`** — internal shared module (no manifest/publish):
+  connect logic, the `Get-SnapshotArea` collection wrapper, the D9 status classifier,
+  stable-key ordering, canonical serialization, provenance builder, and the
+  `_manifest.csv` status view writer.
+- **`docs/SNAPSHOT-SCHEMA.md`** — draft snapshot schema (`1.0-draft`): document layout,
+  envelope fields, status vocabulary, stable-key and ordering rules, sidecar
+  conventions, volatile-field register, and engine notes. Freezes at the sandbox
+  checkpoint.
+- ~43 new offline tests (module unit + integration): status paths incl. AccessDenied
+  vs Failed, envelope-for-every-area, 1-item array normalization pinned at JSON-text
+  level, byte-identical serialization (file-hash equality), provenance shape, sidecar
+  routing, crash-to-partial-snapshot.
+
+### Changed
+- **`Invoke-PurviewSourceDiscovery.ps1` now writes ONE canonical `snapshot.json` per
+  run** (D9) instead of per-area JSON/CSV/CLIXML triples. Every area emits a durable
+  envelope with `Success | Empty | AccessDenied | CmdletNotAvailable | Failed |
+  NotAttempted`; permission failures are distinguished from other failures; the three
+  formerly hand-rolled blocks (SIT rule packages, EDM schemas, the opt-in
+  `Export-PurviewConfig` ZIP) route through the same status recording (closes
+  prior-audit S11). Large artifacts land in `sidecars/` and are referenced by
+  relative forward-slash paths; the ZIP is marked diff-excluded (D6). A terminating
+  error now still yields the snapshot (outcome `Aborted`) with everything collected
+  so far. Run-folder timestamps are UTC.
+- **Breaking (pre-release):** per-area artifact files are gone (per-area CSVs return
+  as *derived views* of the snapshot in Task 5). `_manifest.csv` columns are now
+  `Area, Cmdlets, Status, Count, Error, DurationMs`.
+- `New-PurviewReport.ps1` still reads the legacy per-area CSVs: a fresh snapshot run
+  renders an empty report until the derived views land (Task 5); the report rebuild
+  itself is Batch 4.
+
+### Removed
+- **CLIXML output (D10).** `Export-Clixml` is gone from the toolkit; the AST guard's
+  export allowlist no longer contains it, so it cannot silently return.
+
 ## Unreleased — discovery-refocus batch 1
 
 ### Changed
