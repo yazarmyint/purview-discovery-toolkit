@@ -142,6 +142,29 @@ Describe 'Sidecar areas route through the wrapper (integration)' {
     }
 }
 
+Describe 'Non-terminating cmdlet errors record failure statuses, never Empty (sandbox regression)' {
+    BeforeAll {
+        # Reproduces the sandbox defect: the EXO proxy module wrote
+        # ErrorOnlyAllowInEopException as a NON-terminating error (its module session
+        # state does not see the script's ErrorActionPreference='Stop'), and the area
+        # recorded [Empty] 0 instead of a failure.
+        function Get-DlpSensitiveInformationTypeRulePackage {}
+        Mock Get-DlpSensitiveInformationTypeRulePackage {
+            $ErrorActionPreference = 'Continue'
+            Write-Error 'The operation is only allowed to run in Exchange Online Protection environment. (ErrorOnlyAllowInEopException)'
+        }
+        $script:Root4 = Join-Path $TestDrive 'eop'
+        & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $script:Root4 -ReuseExistingSession *> $null
+        $script:Snap4 = Read-Snapshot (Get-RunDir $script:Root4)
+    }
+    It 'the rule-package area records Failed with the EOP message, not Empty' {
+        $a = @($script:Snap4.areas) | Where-Object { $_.area -eq 'Classification.SitRulePackages' }
+        $a.status | Should -Be 'Failed'
+        $a.count  | Should -Be 0
+        $a.error  | Should -Match 'Exchange Online Protection'
+    }
+}
+
 Describe 'Crash safety - a terminating error mid-run still yields snapshot + manifest + closed transcript' {
     BeforeAll {
         # Simulated top-level failure at the first Audit-area progress line: every

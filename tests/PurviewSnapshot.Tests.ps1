@@ -104,6 +104,39 @@ Describe 'Get-SnapshotArea (envelope + status paths)' {
         $env = Get-SnapshotArea -Area 'T' -Collect { @(1) } -Process { throw 'Access denied writing sidecar' }
         $env.status | Should -Be 'AccessDenied'
     }
+    # Sandbox defect (Task 5b): EXO v3 cmdlets are proxy functions in their own
+    # module session state, where the calling script's ErrorActionPreference='Stop'
+    # does not apply. A REST failure there is written as a NON-terminating error:
+    # the collect block returns nothing and the area recorded [Empty] - an error
+    # masquerading as valid negative evidence. Non-terminating errors must classify
+    # through the same status vocabulary as thrown exceptions.
+    It 'a non-terminating error from the collect block records Failed, never Empty' {
+        $env = Get-SnapshotArea -Area 'T' -Cmdlet 'Get-Fake' -Collect {
+            $ErrorActionPreference = 'Continue'
+            Write-Error 'The operation is only allowed to run in Exchange Online Protection environment.'
+        }
+        $env.status | Should -Be 'Failed'
+        $env.count  | Should -Be 0
+        $env.error  | Should -Match 'Exchange Online Protection'
+    }
+    It 'a non-terminating authorization error classifies AccessDenied' {
+        $env = Get-SnapshotArea -Area 'T' -Collect {
+            $ErrorActionPreference = 'Continue'
+            Write-Error 'Access is denied. Check role assignments.'
+        }
+        $env.status | Should -Be 'AccessDenied'
+    }
+    It 'partial output plus a non-terminating error keeps the objects but records the failure status' {
+        $env = Get-SnapshotArea -Area 'T' -Collect {
+            $ErrorActionPreference = 'Continue'
+            [pscustomobject]@{ Name = 'n1' }
+            Write-Error 'stream broke midway'
+        }
+        $env.status | Should -Be 'Failed'
+        $env.count  | Should -Be 1
+        @($env.objects)[0].Name | Should -Be 'n1'
+        $env.error  | Should -Match 'stream broke'
+    }
     It 'strips PowerShell remoting noise properties from objects' {
         $env = Get-SnapshotArea -Area 'T' -Collect {
             @([pscustomobject]@{ Name = 'x'; PSComputerName = 'srv'; RunspaceId = 'r'; PSShowComputerName = $true })

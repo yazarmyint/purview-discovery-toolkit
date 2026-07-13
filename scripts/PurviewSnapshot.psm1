@@ -211,7 +211,14 @@ function Get-SnapshotArea {
         throw "Get-SnapshotArea '$Area': -Collect is required unless -Skip is set."
     } else {
         try {
-            $raw = @(@(& $Collect) | Where-Object { $null -ne $_ })
+            # 2>&1 captures NON-terminating errors: cmdlets living in another module
+            # session state (the EXO v3 proxies) do not see the calling script's
+            # ErrorActionPreference='Stop', so their failures arrive on the error
+            # stream instead of throwing. Task 5b: those must classify like thrown
+            # exceptions - an error is never recorded as Empty.
+            $rawAll = @(& $Collect 2>&1)
+            $errRecords = @($rawAll | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+            $raw = @($rawAll | Where-Object { $null -ne $_ -and $_ -isnot [System.Management.Automation.ErrorRecord] })
             $notes = @()
             if ($Process) {
                 $r = & $Process $raw
@@ -222,8 +229,16 @@ function Get-SnapshotArea {
                 $objects = $raw
             }
             $objects = ConvertTo-SnapshotObjects -Objects $objects
-            $status = if (@($objects).Count -gt 0) { 'Success' } else { 'Empty' }
-            if (@($notes).Count -gt 0) { $err = (@($notes) -join '; ') }
+            if (@($errRecords).Count -gt 0) {
+                # Collected objects (if any) are kept: a failure status with a
+                # nonzero count means partial collection, documented in the schema.
+                $status = Resolve-SnapshotFailureStatus -Exception $errRecords[0].Exception
+                $notes = @(@($errRecords | Select-Object -First 3 | ForEach-Object { "$_" }) + @($notes))
+                $err = (@($notes) -join '; ')
+            } else {
+                $status = if (@($objects).Count -gt 0) { 'Success' } else { 'Empty' }
+                if (@($notes).Count -gt 0) { $err = (@($notes) -join '; ') }
+            }
         } catch {
             $status = Resolve-SnapshotFailureStatus -Exception $_.Exception
             $err = $_.Exception.Message
