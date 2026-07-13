@@ -4,7 +4,7 @@
     Content Explorer baseline: item counts per SIT / sensitivity label / retention label.
     Requires the "Content Explorer List Viewer" (counts/list) or "Content Explorer Content
     Viewer" role - NEITHER is granted by the Compliance Administrator role group, so assign
-    one explicitly. Run against the SOURCE tenant.
+    one explicitly. Run against the tenant under assessment.
     In -Detailed mode the output includes file names, UPNs, and site URLs - treat as confidential.
 .PARAMETER TagType
     Canonical Export-ContentExplorerData TagType values: SensitiveInformationType, Sensitivity,
@@ -16,7 +16,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$SourceUpn,
+    [Parameter(Mandatory)][string]$UserPrincipalName,
     [string]$OutputRoot = "C:\PurviewDiscovery",
     [ValidateSet('SensitiveInformationType','Sensitivity','Retention','TrainableClassifier')]
     [string]$TagType = 'SensitiveInformationType',
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
-function Connect-Ipps { Connect-IPPSSession -UserPrincipalName $SourceUpn -WarningAction SilentlyContinue | Out-Null }
+function Connect-Ipps { Connect-IPPSSession -UserPrincipalName $UserPrincipalName -WarningAction SilentlyContinue | Out-Null }
 if (-not $ReuseExistingSession) { Connect-Ipps }
 
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'

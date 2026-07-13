@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — discovery-refocus batch 2, post-checkpoint (schema freeze + renames)
+
+The sandbox checkpoint ran Script A read-only against a live tenant. The property-shape
+probe could not run, so the schema froze against **Microsoft-documented property names**
+with every unverified projection listed in `docs/SNAPSHOT-SCHEMA.md` ("Unverified
+projections"). The run surfaced two real defects, both fixed test-first:
+
+### Fixed
+- **Dictionary-valued properties no longer fail their area (sandbox defect).**
+  `Get-DlpSensitiveInformationType` objects carry a Hashtable property with non-string
+  keys; `ConvertTo-Json` rejects those on both engines, so the whole
+  `Classification.SensitiveInformationTypes` area recorded `0 [Failed]` — blanking the
+  150+ built-in classifier inventory on every tenant. The normalization layer now
+  rewrites every reachable dictionary with string keys in ordinal order (also fixing a
+  latent nondeterminism: hashtable enumeration order is randomized per process on
+  pwsh 7, which would have broken byte-identical diffs). Collisions keep both values.
+- **Non-terminating cmdlet errors no longer masquerade as `Empty` (sandbox defect).**
+  `Get-DlpSensitiveInformationTypeRulePackage` failed with `ErrorOnlyAllowInEopException`
+  but recorded `[Empty] 0`. EXO v3 cmdlets are proxy functions in their own module
+  session state, where the script's `$ErrorActionPreference='Stop'` does not apply —
+  the failure arrived on the error stream. `Get-SnapshotArea` now merges the collect
+  error stream and classifies any `ErrorRecord` through the D9 vocabulary; partially
+  collected objects are kept (a failure status with nonzero count = partial collection).
+
+### Changed
+- **`schemaVersion` frozen at `1.0`.** Rule areas (`Dlp.Rules`,
+  `InformationProtection.AutoLabelRules`, `RetentionRecords.Rules`) declare documented
+  composite stable keys, recorded in a new `stableKeyProperties` envelope field, so a
+  missing live `Guid` never silently drops the future diff to the content hash.
+- **Per-area CSVs return as `views/<Area>.csv`** — derived from the snapshot envelopes
+  after `snapshot.json` is written, never a second tenant call. Unverified columns emit
+  blank when absent on live objects.
+- **`areas[].count` left the volatile-field register**: a count delta only happens when
+  the objects changed, i.e. a real configuration change a diff should surface
+  (reasoning in `docs/SNAPSHOT-SCHEMA.md`).
+- **Breaking (pre-release, D11 renames):** `-SourceUpn` → `-UserPrincipalName` on all
+  three collection scripts; run folders `SourceDiscovery-*` → `PurviewSnapshot-*`;
+  Script A gains an optional `-SnapshotLabel` stamped into provenance; migration-era
+  vocabulary removed from headers and docs.
+
 ## Unreleased — discovery-refocus batch 2 (canonical snapshot model)
 
 ### Added

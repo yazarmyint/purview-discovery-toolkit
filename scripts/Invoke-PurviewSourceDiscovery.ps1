@@ -17,8 +17,10 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$SourceUpn,
+    [Parameter(Mandatory)][string]$UserPrincipalName,
     [string]$OutputRoot = "C:\PurviewDiscovery",
+    # Optional engagement label stamped into provenance (e.g. Baseline, Closeout).
+    [string]$SnapshotLabel = '',
     [switch]$IncludePurviewConfigZip,
     [switch]$ReuseExistingSession
 )
@@ -27,7 +29,7 @@ Import-Module (Join-Path $PSScriptRoot 'PurviewSnapshot.psm1') -Force
 
 # --- Run scaffold (UTC stamps; D9) ------------------------------------------
 $startedUtc = (Get-Date).ToUniversalTime()
-$runDir = Join-Path $OutputRoot ("SourceDiscovery-" + $startedUtc.ToString('yyyyMMdd-HHmmss'))
+$runDir = Join-Path $OutputRoot ("PurviewSnapshot-" + $startedUtc.ToString('yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 Start-Transcript -Path (Join-Path $runDir '_transcript.log') -Force | Out-Null
 $script:Areas = [System.Collections.Generic.List[object]]::new()
@@ -93,7 +95,7 @@ function Trace-Area($Envelope) {
 # are still produced (finally block at EOF).
 try {
 
-Connect-PurviewSnapshotSession -UserPrincipalName $SourceUpn -ReuseExistingSession:$ReuseExistingSession
+Connect-PurviewSnapshotSession -UserPrincipalName $UserPrincipalName -ReuseExistingSession:$ReuseExistingSession
 
 # === Information Protection ==================================================
 Trace-Area (Get-SnapshotArea -Area 'InformationProtection.SensitivityLabels' -Cmdlet 'Get-Label' -Collect { Get-Label })
@@ -218,8 +220,9 @@ Write-Host "Snapshot run complete." -ForegroundColor Cyan
     $endedUtc = (Get-Date).ToUniversalTime()
     $outcome = if ($script:RunCompleted) { 'Completed' } else { 'Aborted' }
     try {
-        $prov = Get-SnapshotProvenance -UserPrincipalName $SourceUpn -Parameters $PSBoundParameters `
-            -StartedUtc $startedUtc -EndedUtc $endedUtc -ScriptName 'Invoke-PurviewSourceDiscovery.ps1' -Outcome $outcome
+        $prov = Get-SnapshotProvenance -UserPrincipalName $UserPrincipalName -Parameters $PSBoundParameters `
+            -StartedUtc $startedUtc -EndedUtc $endedUtc -ScriptName 'Invoke-PurviewSourceDiscovery.ps1' `
+            -SnapshotLabel $SnapshotLabel -Outcome $outcome
         $doc = Get-PurviewSnapshotDocument -Provenance $prov -Areas @($script:Areas)
         Write-PurviewSnapshot -Document $doc -Path (Join-Path $runDir 'snapshot.json')
         Write-Host "Snapshot: $(Join-Path $runDir 'snapshot.json') ($outcome)" -ForegroundColor Cyan

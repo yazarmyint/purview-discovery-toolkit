@@ -66,7 +66,7 @@ Four scripts. A collects the configuration; B and C collect content and audit de
 ## Workflow
 
 ```
-1.  A  →  run against the tenant                    → SourceDiscovery-<timestamp>/
+1.  A  →  run against the tenant                    → PurviewSnapshot-<timestamp>/
 2.  B, C  (optional) →  run against the tenant      → content inventory + audit sample
 3.  E  →  point at the A-run folder                 → HTML discovery baseline report
 ```
@@ -78,9 +78,11 @@ audit detail when you need them.
 
 ## Configuring it for your own use
 
-The collection scripts take a `-SourceUpn` and write under `-OutputRoot`
+The collection scripts take a `-UserPrincipalName` and write under `-OutputRoot`
 (default `C:\PurviewDiscovery`). Adjust the record types, date window, and page sizes
-via their parameters.
+via their parameters. Script A also accepts an optional `-SnapshotLabel` (e.g.
+`Baseline`, `Closeout`) that is stamped into the snapshot's provenance — useful when
+you will later compare a start-of-engagement snapshot with an end-of-engagement one.
 
 The **report** script (E) carries the labeling you'll want to change:
 
@@ -97,7 +99,7 @@ Example:
 
 ```powershell
 .\New-PurviewReport.ps1 `
-    -Path C:\PurviewDiscovery\SourceDiscovery-20260628-101500 `
+    -Path C:\PurviewDiscovery\PurviewSnapshot-20260628-101500 `
     -OrganizationName "Your Org" -PreparedBy "Your Org" -Classification "Internal"
 ```
 

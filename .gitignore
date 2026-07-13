@@ -1,5 +1,5 @@
 # ===========================================================================
-# Toolkit output — NEVER COMMIT
+# Toolkit output ? NEVER COMMIT
 # These folders and files contain discovered tenant configuration and, in
 # -Detailed / audit modes, item-level metadata (file names, UPNs, site URLs).
 # Default output goes to C:\PurviewDiscovery (outside the repo); this is a
@@ -8,7 +8,7 @@
 # ===========================================================================
 
 # Per-run output folders (matched at any depth)
-SourceDiscovery-*/
+PurviewSnapshot-*/
 ContentInventory-*/
 AuditSample-*/
 

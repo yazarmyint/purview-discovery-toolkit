@@ -12,7 +12,7 @@
 One run of `Invoke-PurviewSourceDiscovery.ps1` produces one run folder:
 
 ```
-SourceDiscovery-<UTC yyyyMMdd-HHmmss>/
+PurviewSnapshot-<UTC yyyyMMdd-HHmmss>/
   snapshot.json          <- the canonical snapshot (single source of truth)
   _manifest.csv          <- derived status view (one row per area)
   _transcript.log        <- console transcript of the run
@@ -51,7 +51,7 @@ unverified shape) and the diff-excluded areas have no view.
 | `tool`, `toolVersion` | Generator identity (`purview-discovery-toolkit`) |
 | `script` | Collector script name |
 | `userPrincipalName` | Account the run was invoked for |
-| `snapshotLabel` | Optional engagement label (e.g. `Baseline`, `Closeout`; parameter lands with the D11 renames) |
+| `snapshotLabel` | Optional engagement label from `-SnapshotLabel` (e.g. `Baseline`, `Closeout`) |
 | `parameters` | Invocation parameters, key-sorted, switches as booleans |
 | `connections` | Tenant identity projected from `Get-ConnectionInformation` (`UserPrincipalName`, `TenantID`, `Organization`, `ConnectionUri`, `State`, `IsEopSession` — whichever exist). Volatile token fields are never captured |
 | `moduleVersions` | `ExchangeOnlineManagement` version in the session |

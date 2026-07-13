@@ -3,8 +3,8 @@
 .SYNOPSIS
     Sample unified audit log export for DLP / labelling / disposition activity over a
     date window. Provides override-justification and activity evidence. Run against the
-    SOURCE tenant. Audit output includes object IDs (file/message identifiers), user IDs,
-    and policy/SIT match detail - treat as confidential.
+    tenant under assessment. Audit output includes object IDs (file/message identifiers),
+    user IDs, and policy/SIT match detail - treat as confidential.
 .NOTES
     RecordType values must match the canonical AuditLogRecordType enum (an invalid value
     fails parameter binding and that type is silently skipped). Endpoint DLP = 'DLPEndpoint'
@@ -23,7 +23,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$SourceUpn,
+    [Parameter(Mandatory)][string]$UserPrincipalName,
     [string]$OutputRoot = "C:\PurviewDiscovery",
     [ValidateRange(1, 365)][int]$DaysBack = 7,
     [string[]]$RecordTypes = @('ComplianceDLPSharePoint','ComplianceDLPExchange','DLPEndpoint',
@@ -33,7 +33,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
-if (-not $ReuseExistingSession) { Connect-ExchangeOnline -UserPrincipalName $SourceUpn -ShowBanner:$false }
+if (-not $ReuseExistingSession) { Connect-ExchangeOnline -UserPrincipalName $UserPrincipalName -ShowBanner:$false }
 
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $outDir = Join-Path $OutputRoot "AuditSample-$stamp"

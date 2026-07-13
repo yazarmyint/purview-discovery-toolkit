@@ -5,11 +5,11 @@ BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     $script:ScriptPath = Join-Path (Join-Path $repoRoot 'scripts') 'New-PurviewReport.ps1'
 
-    # Builds a minimal SourceDiscovery-style fixture folder. Non-ASCII content is
+    # Builds a minimal snapshot-run-style fixture folder. Non-ASCII content is
     # constructed with [char] so this test source stays ASCII (DECISIONS.md D7).
     function New-FixtureRun {
         param([string]$Root, [string]$LabelName)
-        $run = Join-Path $Root 'SourceDiscovery-fixture'
+        $run = Join-Path $Root 'PurviewSnapshot-fixture'
         $ip  = Join-Path $run '1-InformationProtection'
         New-Item -ItemType Directory -Force -Path $ip | Out-Null
         [pscustomobject]@{

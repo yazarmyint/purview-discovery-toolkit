@@ -9,7 +9,7 @@ BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     $script:ScriptPath = Join-Path (Join-Path $repoRoot 'scripts') 'Invoke-PurviewSourceDiscovery.ps1'
     function Get-RunDir([string]$Root) {
-        (Get-ChildItem -Path $Root -Directory -Filter 'SourceDiscovery-*' -ErrorAction SilentlyContinue |
+        (Get-ChildItem -Path $Root -Directory -Filter 'PurviewSnapshot-*' -ErrorAction SilentlyContinue |
             Select-Object -First 1).FullName
     }
     function Read-Snapshot([string]$RunDir) {
@@ -35,7 +35,8 @@ Describe 'Snapshot run - the full D9 status vocabulary end to end (integration)'
         Mock Get-AutoSensitivityLabelRule { throw 'catastrophic parse error' }
 
         $script:Root = Join-Path $TestDrive 'statuses'
-        & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $script:Root -ReuseExistingSession *> $null
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:Root `
+            -SnapshotLabel 'Baseline' -ReuseExistingSession *> $null
         $script:RunDir = Get-RunDir $script:Root
         $script:Snap = Read-Snapshot $script:RunDir
         $script:AreasByName = @{}
@@ -92,6 +93,12 @@ Describe 'Snapshot run - the full D9 status vocabulary end to end (integration)'
         $p.userPrincipalName | Should -Be 'tester@contoso.example'
         $p.outcome           | Should -Be 'Completed'
         $p.parameters.OutputRoot | Should -Not -BeNullOrEmpty
+        # D11 renames: the engagement label lands in provenance, and the recorded
+        # parameters carry the new name, not the migration-era one.
+        $p.snapshotLabel | Should -Be 'Baseline'
+        $paramNames = @($p.parameters.PSObject.Properties | ForEach-Object { $_.Name })
+        $paramNames | Should -Contain 'UserPrincipalName'
+        $paramNames | Should -Not -Contain 'SourceUpn'
         # Timestamps asserted on the raw JSON text: pwsh's ConvertFrom-Json converts
         # ISO-8601 strings to [datetime] (5.1 keeps strings), so the parsed value is
         # not engine-stable but the serialized document is.
@@ -149,7 +156,7 @@ Describe 'Sidecar areas route through the wrapper (integration)' {
             })
         }
         $script:Root2 = Join-Path $TestDrive 'sidecars'
-        & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $script:Root2 -ReuseExistingSession *> $null
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:Root2 -ReuseExistingSession *> $null
         $script:RunDir2 = Get-RunDir $script:Root2
         $script:Snap2 = Read-Snapshot $script:RunDir2
     }
@@ -178,7 +185,7 @@ Describe 'Non-terminating cmdlet errors record failure statuses, never Empty (sa
             Write-Error 'The operation is only allowed to run in Exchange Online Protection environment. (ErrorOnlyAllowInEopException)'
         }
         $script:Root4 = Join-Path $TestDrive 'eop'
-        & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $script:Root4 -ReuseExistingSession *> $null
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:Root4 -ReuseExistingSession *> $null
         $script:Snap4 = Read-Snapshot (Get-RunDir $script:Root4)
     }
     It 'the rule-package area records Failed with the EOP message, not Empty' {
@@ -199,7 +206,7 @@ Describe 'Crash safety - a terminating error mid-run still yields snapshot + man
         $script:Root3 = Join-Path $TestDrive 'crash'
         $script:Threw = $false
         try {
-            & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $script:Root3 -ReuseExistingSession *> $null
+            & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:Root3 -ReuseExistingSession *> $null
         } catch {
             $script:Threw = $true
         }

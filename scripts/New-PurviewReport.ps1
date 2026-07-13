@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Generates a client-ready, self-contained HTML inventory report from the Purview
-    discovery toolkit output. Reads a SourceDiscovery-* run folder and renders a
+    discovery toolkit output. Reads a PurviewSnapshot-* run folder and renders a
     read-only inventory of the tenant's information-protection configuration.
 
     The report is fully offline (inline CSS + inline SVG charts + inline JS, no CDN),
@@ -11,7 +11,7 @@
 
 .EXAMPLE
     .\New-PurviewReport.ps1 `
-        -Path C:\PurviewDiscovery\SourceDiscovery-20260628-101500 `
+        -Path C:\PurviewDiscovery\PurviewSnapshot-20260628-101500 `
         -OrganizationName "Contoso Ltd" -PreparedBy "Acme Advisory" -Classification "Confidential"
 #>
 [CmdletBinding()]

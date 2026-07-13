@@ -49,7 +49,7 @@ BeforeAll {
     # and functions don't leak into the test session. Mocks still apply (same session state).
     function Invoke-C {
         param([string]$Root, [string[]]$RecordTypes, [int]$DaysBack = 1, [int]$MaxPerDay = 5000)
-        & $script:ScriptPath -SourceUpn 'tester@contoso.example' -OutputRoot $Root `
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $Root `
             -RecordTypes $RecordTypes -DaysBack $DaysBack -MaxPerDay $MaxPerDay -ReuseExistingSession *> $null
     }
 
@@ -63,7 +63,7 @@ Describe 'Expand-AuditRow (JSON parse paths)' {
         Mock Search-UnifiedAuditLog { @() }
         $eap = $ErrorActionPreference
         # Dot-source once (body is a no-op with an empty Search) to bring Expand-AuditRow into scope.
-        . $script:ScriptPath -SourceUpn 'x@y.example' -OutputRoot (Join-Path $TestDrive 'ds') `
+        . $script:ScriptPath -UserPrincipalName 'x@y.example' -OutputRoot (Join-Path $TestDrive 'ds') `
             -RecordTypes @('DLPEndpoint') -DaysBack 1 -ReuseExistingSession *> $null
         $script:ExpandFn = ${function:Expand-AuditRow}
         $ErrorActionPreference = $eap
@@ -380,7 +380,7 @@ Describe 'Phase 1 - default window is 7 days' {
     }
     It '[RED->green after default change] omitting -DaysBack searches seven one-day windows' {
         # Invoked directly (not via Invoke-C, which passes -DaysBack) to exercise the script default.
-        & $script:ScriptPath -SourceUpn 'x@y.example' -OutputRoot (New-Root) -RecordTypes @('DLPEndpoint') `
+        & $script:ScriptPath -UserPrincipalName 'x@y.example' -OutputRoot (New-Root) -RecordTypes @('DLPEndpoint') `
             -MaxPerDay 5000 -ReuseExistingSession *> $null
         Should -Invoke Search-UnifiedAuditLog -Exactly -Times 7
     }
