@@ -15,7 +15,7 @@
         Success | Empty | AccessDenied | CmdletNotAvailable | Failed | NotAttempted
 #>
 
-$script:SnapshotSchemaVersion = '1.0-draft'   # frozen at the sandbox checkpoint (Task 5)
+$script:SnapshotSchemaVersion = '1.0'   # frozen at the sandbox checkpoint (2026-07-13); see docs/SNAPSHOT-SCHEMA.md
 $script:SnapshotToolName      = 'purview-discovery-toolkit'
 $script:SnapshotToolVersion   = '2.0.0-dev'
 
@@ -83,12 +83,26 @@ function Resolve-SnapshotFailureStatus {
 }
 
 function Get-SnapshotStableKey {
-    <# Stable identifier used to order objects deterministically (D9): Guid+Name
-       composite where a Guid exists, then Name, then Identity, then a SHA-256 of the
-       object's compact JSON. Documented in docs/SNAPSHOT-SCHEMA.md. #>
+    <# Stable identifier used to order objects deterministically (D9). When -Property
+       names a documented per-area composite (Task 5c), the key is built from those
+       properties in order (absent/empty ones skipped); rule areas declare composites
+       so the diff never silently lands on the content hash. Otherwise the generic
+       rule applies: Guid+Name composite where a Guid exists, then Name, then
+       Identity, then a SHA-256 of the object's compact JSON. Documented in
+       docs/SNAPSHOT-SCHEMA.md. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Object)
+    param(
+        [Parameter(Mandatory)]$Object,
+        [string[]]$Property = @()
+    )
     $p = $Object.PSObject.Properties
+    if (@($Property).Count -gt 0) {
+        $parts = @(foreach ($n in @($Property)) {
+            if ($p[$n] -and "$($Object.$n)" -ne '') { $n.ToLowerInvariant() + ':' + "$($Object.$n)" }
+        })
+        if (@($parts).Count -gt 0) { return ($parts -join '|') }
+        # No declared property present on this object: fall through to the generic rule.
+    }
     $guid     = if ($p['Guid'])     { "$($Object.Guid)" }     else { '' }
     $name     = if ($p['Name'])     { "$($Object.Name)" }     else { '' }
     $identity = if ($p['Identity']) { "$($Object.Identity)" } else { '' }
@@ -150,9 +164,13 @@ function ConvertTo-SnapshotObjects {
     <# Normalizes a collected object set for the snapshot: drops nulls, strips
        remoting noise properties, rewrites dictionary values JSON-safe (Task 5a), and
        sorts by stable key (ordinal, with the object's compact JSON as tiebreaker so
-       duplicate keys still order deterministically). #>
+       duplicate keys still order deterministically). -StableKeyProperty forwards a
+       per-area composite key declaration (Task 5c). #>
     [CmdletBinding()]
-    param([object[]]$Objects = @())
+    param(
+        [object[]]$Objects = @(),
+        [string[]]$StableKeyProperty = @()
+    )
     $clean = [System.Collections.Generic.List[object]]::new()
     foreach ($o in @($Objects)) {
         if ($null -eq $o) { continue }
@@ -175,7 +193,7 @@ function ConvertTo-SnapshotObjects {
     $decorated = [System.Collections.Generic.List[object]]::new()
     foreach ($o in $clean) {
         $tiebreak = ConvertTo-Json -InputObject $o -Depth 12 -Compress -WarningAction SilentlyContinue
-        $decorated.Add([pscustomobject]@{ K = (Get-SnapshotStableKey -Object $o) + "`n" + $tiebreak; O = $o })
+        $decorated.Add([pscustomobject]@{ K = (Get-SnapshotStableKey -Object $o -Property $StableKeyProperty) + "`n" + $tiebreak; O = $o })
     }
     $decorated.Sort([System.Comparison[object]] { param($x, $y) [string]::CompareOrdinal($x.K, $y.K) })
     $sorted = New-Object 'object[]' $decorated.Count
@@ -198,6 +216,7 @@ function Get-SnapshotArea {
         [string[]]$Cmdlet = @(),
         [scriptblock]$Collect,
         [scriptblock]$Process,
+        [string[]]$StableKeyProperty = @(),
         [switch]$DiffExcluded,
         [switch]$Skip,
         [string]$SkipReason = 'Skipped by parameter'
@@ -228,7 +247,7 @@ function Get-SnapshotArea {
             } else {
                 $objects = $raw
             }
-            $objects = ConvertTo-SnapshotObjects -Objects $objects
+            $objects = ConvertTo-SnapshotObjects -Objects $objects -StableKeyProperty $StableKeyProperty
             if (@($errRecords).Count -gt 0) {
                 # Collected objects (if any) are kept: a failure status with a
                 # nonzero count means partial collection, documented in the schema.
@@ -254,6 +273,7 @@ function Get-SnapshotArea {
         error        = $err
         durationMs   = [long]$sw.ElapsedMilliseconds
         diffExcluded = [bool]$DiffExcluded
+        stableKeyProperties = @($StableKeyProperty)
         sidecars     = @($sidecars)
         objects      = @($objects)
     }

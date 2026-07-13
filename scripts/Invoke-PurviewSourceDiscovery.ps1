@@ -69,7 +69,8 @@ Connect-PurviewSnapshotSession -UserPrincipalName $SourceUpn -ReuseExistingSessi
 Trace-Area (Get-SnapshotArea -Area 'InformationProtection.SensitivityLabels' -Cmdlet 'Get-Label' -Collect { Get-Label })
 Trace-Area (Get-SnapshotArea -Area 'InformationProtection.LabelPolicies' -Cmdlet 'Get-LabelPolicy' -Collect { Get-LabelPolicy })
 Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelPolicies' -Cmdlet 'Get-AutoSensitivityLabelPolicy' -Collect { Get-AutoSensitivityLabelPolicy })
-Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelRules' -Cmdlet 'Get-AutoSensitivityLabelRule' -Collect { Get-AutoSensitivityLabelRule })
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelRules' -Cmdlet 'Get-AutoSensitivityLabelRule' `
+    -StableKeyProperty @('Guid', 'ParentPolicyName', 'Name') -Collect { Get-AutoSensitivityLabelRule })
 
 # === Classification ==========================================================
 Trace-Area (Get-SnapshotArea -Area 'Classification.SensitiveInformationTypes' -Cmdlet 'Get-DlpSensitiveInformationType' -Collect { Get-DlpSensitiveInformationType })
@@ -128,13 +129,15 @@ Trace-Area (Get-SnapshotArea -Area 'Classification.EdmSchemas' -Cmdlet 'Get-DlpE
 
 # === Data Loss Prevention ====================================================
 Trace-Area (Get-SnapshotArea -Area 'Dlp.Policies' -Cmdlet 'Get-DlpCompliancePolicy' -Collect { Get-DlpCompliancePolicy })
-Trace-Area (Get-SnapshotArea -Area 'Dlp.Rules' -Cmdlet 'Get-DlpComplianceRule' -Collect { Get-DlpComplianceRule })
+Trace-Area (Get-SnapshotArea -Area 'Dlp.Rules' -Cmdlet 'Get-DlpComplianceRule' `
+    -StableKeyProperty @('Guid', 'ParentPolicyName', 'Name') -Collect { Get-DlpComplianceRule })
 Trace-Area (Get-SnapshotArea -Area 'Dlp.EndpointGlobalSettings' -Cmdlet 'Get-PolicyConfig' -Collect { Get-PolicyConfig })
 
 # === Data Lifecycle & Records ================================================
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Labels' -Cmdlet 'Get-ComplianceTag' -Collect { Get-ComplianceTag })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Policies' -Cmdlet 'Get-RetentionCompliancePolicy' -Collect { Get-RetentionCompliancePolicy -DistributionDetail })
-Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Rules' -Cmdlet 'Get-RetentionComplianceRule' -Collect { Get-RetentionComplianceRule })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Rules' -Cmdlet 'Get-RetentionComplianceRule' `
+    -StableKeyProperty @('Guid', 'Policy', 'Name') -Collect { Get-RetentionComplianceRule })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.EventTypes' -Cmdlet 'Get-ComplianceRetentionEventType' -Collect { Get-ComplianceRetentionEventType })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.AdaptiveScopes' -Cmdlet 'Get-AdaptiveScope' -Collect { Get-AdaptiveScope })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanAuthorities' -Cmdlet 'Get-FilePlanPropertyAuthority' -Collect { Get-FilePlanPropertyAuthority })

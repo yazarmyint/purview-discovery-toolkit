@@ -42,8 +42,14 @@ Describe 'Snapshot run - the full D9 status vocabulary end to end (integration)'
         foreach ($a in @($script:Snap.areas)) { $script:AreasByName[$a.area] = $a }
     }
 
-    It 'writes snapshot.json with the draft schema version' {
-        $script:Snap.schemaVersion | Should -Be '1.0-draft'
+    It 'writes snapshot.json with the frozen schema version' {
+        $script:Snap.schemaVersion | Should -Be '1.0'
+    }
+    It 'rule areas declare documented composite stable keys (frozen at checkpoint)' {
+        @($script:AreasByName['Dlp.Rules'].stableKeyProperties)                          | Should -Be @('Guid', 'ParentPolicyName', 'Name')
+        @($script:AreasByName['InformationProtection.AutoLabelRules'].stableKeyProperties) | Should -Be @('Guid', 'ParentPolicyName', 'Name')
+        @($script:AreasByName['RetentionRecords.Rules'].stableKeyProperties)             | Should -Be @('Guid', 'Policy', 'Name')
+        @($script:AreasByName['InformationProtection.SensitivityLabels'].stableKeyProperties).Count | Should -Be 0
     }
     It 'Success: objects captured and ordered by stable key, not arrival order' {
         $a = $script:AreasByName['InformationProtection.SensitivityLabels']

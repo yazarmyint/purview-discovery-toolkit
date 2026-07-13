@@ -149,6 +149,33 @@ Describe 'Get-SnapshotArea (envelope + status paths)' {
     }
 }
 
+Describe 'Stable-key property overrides (Task 5c)' {
+    # Rule objects may lack a Guid on live output (prior-audit suspect). Each rule
+    # area declares a documented composite key so the future diff never silently
+    # falls back to the content hash; the envelope carries the declaration so
+    # snapshots are self-describing.
+    It 'orders by the declared composite key, policy before name' {
+        $env = Get-SnapshotArea -Area 'T' -StableKeyProperty @('ParentPolicyName', 'Name') -Collect {
+            @([pscustomobject]@{ Name = 'zz'; ParentPolicyName = 'A-Pol' },
+              [pscustomobject]@{ Name = 'aa'; ParentPolicyName = 'B-Pol' },
+              [pscustomobject]@{ Name = 'bb'; ParentPolicyName = 'A-Pol' })
+        }
+        @($env.objects | ForEach-Object { $_.Name }) | Should -Be @('bb', 'zz', 'aa')
+    }
+    It 'the envelope declares its stable-key properties (self-describing for the diff)' {
+        $env = Get-SnapshotArea -Area 'T' -StableKeyProperty @('Guid', 'ParentPolicyName', 'Name') -Collect { @() }
+        @($env.stableKeyProperties) | Should -Be @('Guid', 'ParentPolicyName', 'Name')
+        $env2 = Get-SnapshotArea -Area 'T2' -Collect { @() }
+        @($env2.stableKeyProperties).Count | Should -Be 0
+    }
+    It 'objects missing every declared key property fall back to the generic stable key' {
+        $env = Get-SnapshotArea -Area 'T' -StableKeyProperty @('Guid', 'ParentPolicyName') -Collect {
+            @([pscustomobject]@{ Identity = 'z' }, [pscustomobject]@{ Identity = 'a' })
+        }
+        @($env.objects | ForEach-Object { $_.Identity }) | Should -Be @('a', 'z')
+    }
+}
+
 Describe 'Get-SnapshotStableKey' {
     It 'prefers Guid (composited with Name), then Name, then Identity' {
         Get-SnapshotStableKey ([pscustomobject]@{ Guid = 'g1'; Name = 'n'; Identity = 'i' }) | Should -Be 'guid:g1|name:n'
@@ -266,7 +293,7 @@ Describe 'Get-PurviewSnapshotDocument + canonical serialization (D9 diff-readine
     It 'document carries schemaVersion, provenance, volatile register and areas' {
         $doc = Get-PurviewSnapshotDocument -Provenance (New-FixedProvenance) -Areas @(
             (Get-SnapshotArea -Area 'T.One' -Collect { @([pscustomobject]@{ Guid = 'g'; Name = 'n' }) }))
-        $doc.schemaVersion | Should -Be '1.0-draft'
+        $doc.schemaVersion | Should -Be '1.0'
         $doc.provenance.userPrincipalName | Should -Be 'op@contoso.example'
         @($doc.volatileFields).Count | Should -BeGreaterThan 0
         @($doc.areas).Count | Should -Be 1
