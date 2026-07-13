@@ -130,6 +130,84 @@ Describe 'Get-SnapshotStableKey' {
     }
 }
 
+Describe 'Dictionary-valued properties (serialization guard, Task 5a)' {
+    # Sandbox defect: Get-DlpSensitiveInformationType objects carry a Hashtable
+    # property whose keys are not strings; Windows PowerShell 5.1's ConvertTo-Json
+    # rejects it ("Keys must be strings"), failing the whole area. pwsh 7 serializes
+    # such keys but in randomized hash order, breaking byte-identical diffs. The
+    # normalization layer must make every dictionary JSON-safe AND deterministic.
+    BeforeAll {
+        function New-GuardProvenance {
+            $t0 = New-Object datetime 2026, 7, 12, 12, 0, 0, ([System.DateTimeKind]::Utc)
+            Get-SnapshotProvenance -UserPrincipalName 'op@contoso.example' -Parameters @{} `
+                -StartedUtc $t0 -EndedUtc $t0 -ScriptName 'Test.ps1'
+        }
+    }
+    It 'an area whose objects carry non-string-keyed dictionary properties records Success, not Failed' {
+        $env = Get-SnapshotArea -Area 'T.Sits' -Collect {
+            $h1 = @{}; $h1[[int]1] = 'one'
+            $h2 = @{}; $h2[[int]2] = 'two'
+            @([pscustomobject]@{ Name = 'SIT-B'; Map = $h1 },
+              [pscustomobject]@{ Name = 'SIT-A'; Map = $h2 })
+        }
+        $env.status | Should -Be 'Success'
+        $env.count  | Should -Be 2
+    }
+    It 'non-string dictionary keys serialize losslessly with stringified keys' {
+        $env = Get-SnapshotArea -Area 'T.One' -Collect {
+            $h = @{}; $h[[int]1] = 'one'
+            ,([pscustomobject]@{ Name = 'only'; Map = $h })
+        }
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-GuardProvenance) -Areas @($env)
+        $json = ConvertTo-CanonicalSnapshotJson -Document $doc
+        $json | Should -Match '"1":\s*"one"'
+    }
+    It 'dictionary properties serialize with ordinally sorted keys on every engine' {
+        $env = Get-SnapshotArea -Area 'T.Sorted' -Collect {
+            ,([pscustomobject]@{
+                Name = 'x'
+                Map  = @{ kh = 'v'; ka = 'v'; kf = 'v'; kc = 'v'; ke = 'v'; kb = 'v'; kg = 'v'; kd = 'v' }
+            })
+        }
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-GuardProvenance) -Areas @($env)
+        $json = ConvertTo-CanonicalSnapshotJson -Document $doc
+        $idx = @('ka', 'kb', 'kc', 'kd', 'ke', 'kf', 'kg', 'kh' | ForEach-Object { $json.IndexOf('"' + $_ + '"') })
+        $idx[0] | Should -BeGreaterThan -1
+        for ($i = 1; $i -lt $idx.Count; $i++) { $idx[$i] | Should -BeGreaterThan $idx[$i - 1] }
+    }
+    It 'dictionaries nested inside arrays and child objects are normalized too' {
+        $env = Get-SnapshotArea -Area 'T.Nested' -Collect {
+            $inner = @{}; $inner[[int]5] = 'five'
+            ,([pscustomobject]@{
+                Name  = 'x'
+                List  = @(, $inner)
+                Child = [pscustomobject]@{ DeepMap = $inner }
+            })
+        }
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-GuardProvenance) -Areas @($env)
+        $json = ConvertTo-CanonicalSnapshotJson -Document $doc
+        ([regex]::Matches($json, '"5":\s*"five"')).Count | Should -Be 2
+    }
+    It 'stringified key collisions remain lossless (disambiguated, both values kept)' {
+        $env = Get-SnapshotArea -Area 'T.Collide' -Collect {
+            $h = @{}; $h[[int]1] = 'intval'; $h['1'] = 'strval'
+            ,([pscustomobject]@{ Name = 'x'; Map = $h })
+        }
+        $doc = Get-PurviewSnapshotDocument -Provenance (New-GuardProvenance) -Areas @($env)
+        $json = ConvertTo-CanonicalSnapshotJson -Document $doc
+        $json | Should -Match '"1#2":'
+        $json | Should -Match '"intval"'
+        $json | Should -Match '"strval"'
+    }
+    It 'passes scalars, strings, dates and enums through unchanged' {
+        $d = Get-Date
+        (ConvertTo-SnapshotSafeValue -Value 'plain') | Should -BeExactly 'plain'
+        (ConvertTo-SnapshotSafeValue -Value 42)      | Should -Be 42
+        (ConvertTo-SnapshotSafeValue -Value $d)      | Should -BeOfType [datetime]
+        (ConvertTo-SnapshotSafeValue -Value ([System.DayOfWeek]::Friday)) | Should -Be ([System.DayOfWeek]::Friday)
+    }
+}
+
 Describe 'Get-SafeName' {
     It 'sanitizes path-hostile characters and blanks' {
         Get-SafeName 'a/b:c*d' | Should -Be 'a_b_c_d'

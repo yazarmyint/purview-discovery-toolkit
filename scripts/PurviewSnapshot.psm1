@@ -102,25 +102,71 @@ function Get-SnapshotStableKey {
     "hash:$hash"
 }
 
+function ConvertTo-SnapshotSafeValue {
+    <# Makes a value JSON-safe and diff-deterministic (Task 5a). Every dictionary
+       reachable through PSCustomObject properties, arrays and nested dictionaries is
+       rebuilt with STRING keys in ORDINAL order: ConvertTo-Json rejects non-string
+       dictionary keys ("Keys must be strings"), and hashtables enumerate in hash
+       order - randomized per process on pwsh - which would break byte-identical
+       diffs. Key collisions after stringification disambiguate with #2, #3, ... so
+       no value is ever dropped. Scalars, strings, dates, enums and unrecognized
+       .NET objects pass through unchanged. #>
+    [CmdletBinding()]
+    param($Value, [int]$Depth = 12)
+    if ($null -eq $Value -or $Depth -le 0) { return $Value }
+    $t = $Value.GetType()
+    if ($Value -is [string] -or $t.IsPrimitive -or $t.IsEnum -or
+        $Value -is [datetime] -or $Value -is [guid] -or $Value -is [decimal] -or $Value -is [timespan]) { return $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $pairs = [System.Collections.Generic.List[object]]::new()
+        foreach ($k in @($Value.Keys)) { $pairs.Add([pscustomobject]@{ S = "$k"; K = $k }) }
+        $pairs.Sort([System.Comparison[object]] { param($x, $y) [string]::CompareOrdinal($x.S, $y.S) })
+        $safe = [ordered]@{}
+        foreach ($p in $pairs) {
+            $s = $p.S; $i = 2
+            while ($safe.Contains($s)) { $s = "$($p.S)#$i"; $i++ }
+            $safe[$s] = ConvertTo-SnapshotSafeValue -Value $Value[$p.K] -Depth ($Depth - 1)
+        }
+        return $safe
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $copy = [ordered]@{}
+        foreach ($pr in $Value.PSObject.Properties) {
+            $copy[$pr.Name] = ConvertTo-SnapshotSafeValue -Value $pr.Value -Depth ($Depth - 1)
+        }
+        return [pscustomobject]$copy
+    }
+    if ($Value -is [array]) {
+        $et = $t.GetElementType()
+        if ($et -and ($et.IsPrimitive -or $et -eq [string])) { return $Value }
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        return ,@(foreach ($item in $Value) { ConvertTo-SnapshotSafeValue -Value $item -Depth ($Depth - 1) })
+    }
+    $Value
+}
+
 function ConvertTo-SnapshotObjects {
     <# Normalizes a collected object set for the snapshot: drops nulls, strips
-       remoting noise properties, and sorts by stable key (ordinal, with the object's
-       compact JSON as tiebreaker so duplicate keys still order deterministically). #>
+       remoting noise properties, rewrites dictionary values JSON-safe (Task 5a), and
+       sorts by stable key (ordinal, with the object's compact JSON as tiebreaker so
+       duplicate keys still order deterministically). #>
     [CmdletBinding()]
     param([object[]]$Objects = @())
     $clean = [System.Collections.Generic.List[object]]::new()
     foreach ($o in @($Objects)) {
         if ($null -eq $o) { continue }
         $noise = @($o.PSObject.Properties | Where-Object { $_.Name -in $script:TransportNoiseProperties })
-        if (@($noise).Count -gt 0) {
+        $stripped = if (@($noise).Count -gt 0) {
             $copy = [ordered]@{}
             foreach ($pr in $o.PSObject.Properties) {
                 if ($pr.Name -notin $script:TransportNoiseProperties) { $copy[$pr.Name] = $pr.Value }
             }
-            $clean.Add([pscustomobject]$copy)
+            [pscustomobject]$copy
         } else {
-            $clean.Add($o)
+            $o
         }
+        $clean.Add((ConvertTo-SnapshotSafeValue -Value $stripped))
     }
     if ($clean.Count -le 1) { return ,@($clean.ToArray()) }
     # In-place List sort with an ordinal Comparison delegate. (Array.Sort(keys, items)
