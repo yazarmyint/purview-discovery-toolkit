@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — discovery-refocus batch 3, Stop 2 (gated areas + opt-in mailbox sweep)
+
+### Added
+- **11 gated snapshot areas** (D12), same uniform collector method — on accounts
+  without the corresponding role, the wrapper records `AccessDenied` (a durable,
+  classified record), never `Empty` and never a crash:
+  `InsiderRisk.Policies`, `CommunicationCompliance.{Policies, Rules}`,
+  `Ediscovery.{Cases, CaseHoldPolicies, CaseHoldRules, Searches, SecurityFilters,
+  CaseAdmins}` (enumeration of EXISTING objects only; both case types collected;
+  holds enumerated per case), and `InformationProtection.{IrmConfig, RmsTemplates}`.
+  `Ediscovery.SecurityFilters` keys on `FilterName` (the cmdlet's documented
+  identifier — it has no `Name`/`Guid`).
+- **Opt-in mailbox hold sweep** (D12: off by default, aggregate-first):
+  `-IncludeMailboxHolds` enables `Mailboxes.HoldSummary` — counts by hold state
+  (`Metric`/`Value`/`Mailboxes` rows), **no user principal names in evidence**
+  (pinned by test). Adding `-MailboxDetail` enables `Mailboxes.HoldDetail` with one
+  row per mailbox (includes UPNs — documented as confidential). Both record
+  `NotAttempted` with the gating reason when switched off.
+- **Explicit AST-guard pin**: the eDiscovery mutation verbs
+  (`New-/Start-/Stop-ComplianceSearch`, `New-ComplianceSearchAction`,
+  `New-/Remove-ComplianceCase`, `New-CaseHoldPolicy/Rule`, `Set-CaseHoldPolicy`)
+  are asserted absent from every script, on top of the generic mutating-verb rule.
+- 69 new offline tests (suite 254): per gated area Success/AccessDenied/
+  CmdletNotAvailable/Empty — including one gated area exercising the
+  non-terminating (error-stream) role-failure path — plus mailbox aggregation
+  correctness, the no-UPN guarantee, and both NotAttempted gating paths.
+
 ## Unreleased — discovery-refocus batch 3, Stop 1 (coverage expansion: always-readable areas)
 
 ### Added

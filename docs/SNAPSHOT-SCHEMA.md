@@ -132,8 +132,12 @@ collision-free even without the Guid.
 | `Dlp.Rules` | `Guid`, `ParentPolicyName`, `Name` |
 | `InformationProtection.AutoLabelRules` | `Guid`, `ParentPolicyName`, `Name` |
 | `RetentionRecords.Rules` | `Guid`, `Policy`, `Name` |
-| `RetentionRecords.AppRetentionRules`, `Legacy.HoldRules` | `Guid`, `Policy`, `Name` |
+| `RetentionRecords.AppRetentionRules`, `Legacy.HoldRules`, `CommunicationCompliance.Rules`, `Ediscovery.CaseHoldRules` | `Guid`, `Policy`, `Name` |
 | `Governance.RoleGroupMembers` | `RoleGroup`, `MemberName` (toolkit-shaped descriptor rows) |
+| `Ediscovery.SecurityFilters` | `FilterName` (the cmdlet's documented identifier — no `Name`/`Guid`) |
+| `InformationProtection.IrmConfig` | `Identity` (single configuration object) |
+| `Mailboxes.HoldSummary` | `Metric`, `Value` (toolkit-shaped aggregate rows) |
+| `Mailboxes.HoldDetail` | `UserPrincipalName` |
 | every other batch-3 area | `Guid`, `Name` |
 | every batch-2 area not listed | *(empty — generic rule)* |
 
@@ -188,6 +192,18 @@ keys and derived-view columns*, never the stored evidence.
 | `Get-DlpPolicy` (batch 3, legacy EXO DLP) | `Guid`, `State`, `Mode`, `Description` | stable key, view columns |
 | `Get-AppRetentionCompliancePolicy` (batch 3) | `Guid`, `Enabled`, `Mode`, `Applications` | stable key, view columns |
 | `Get-AppRetentionComplianceRule` (batch 3) | `Guid`, `Policy`, `RetentionDuration`, `RetentionComplianceAction`, `ExpirationDateOption` | stable key, view columns |
+| `Get-InsiderRiskPolicy` (batch 3, gated) | `Guid`, `InsiderRiskScenario` | stable key, view columns |
+| `Get-SupervisoryReviewPolicyV2` (batch 3, gated) | `Guid`, `Enabled` | stable key, view columns |
+| `Get-SupervisoryReviewRule` (batch 3, gated) | `Guid`, `Policy`, `SamplingRate` | stable key, view columns |
+| `Get-ComplianceCase` (batch 3, gated) | `Guid`, `CaseType`, `Status`, `Identity` (feeds hold enumeration); `-CaseType AdvancedEdiscovery` parameter value | stable key, view columns, per-case enumeration |
+| `Get-CaseHoldPolicy` (batch 3, gated) | `Guid`, `Enabled`, `Mode`, `CaseId` | stable key, view columns |
+| `Get-CaseHoldRule` (batch 3, gated) | `Guid`, `Policy`, `ContentMatchQuery` | stable key, view columns |
+| `Get-ComplianceSearch` (batch 3, gated) | `Guid`, `CaseName`, `ContentMatchQuery`, `Status` (`Status` is job state — likely diff-noisy; candidate for the volatile register after live validation) | stable key, view columns |
+| `Get-ComplianceSecurityFilter` (batch 3, gated) | `FilterName`, `Users`, `Filters`, `Action`, `Description` | **stable key** (`FilterName`), view columns |
+| `Get-eDiscoveryCaseAdmin` (batch 3, gated) | `Guid`, `Name`, `DisplayName` | stable key, view columns |
+| `Get-IRMConfiguration` (batch 3) | `Identity` (stable key), `AzureRMSLicensingEnabled`, `InternalLicensingEnabled`, `ExternalLicensingEnabled`, `JournalReportDecryptionEnabled`, `SimplifiedClientAccessEnabled`, `TransportDecryptionSetting` | stable key, view columns |
+| `Get-RMSTemplate` (batch 3) | `Guid`, `Description`, `Type` | stable key, view columns |
+| `Get-EXOMailbox` (batch 3, opt-in sweep) | `UserPrincipalName`, `LitigationHoldEnabled`, `InPlaceHolds`, `ComplianceTagHoldApplied`, `DelayHoldApplied`, `RetentionHoldEnabled`, `RetentionPolicy`, `AuditEnabled` | detail stable key, aggregation inputs, view columns |
 
 **Verified by the sandbox run** (no longer suspect): the `Export-PurviewConfig`
 component tokens `DLP, MIPLabels, ClassificationAndTextExtraction, DLM` (prior-audit
@@ -249,6 +265,25 @@ Batch 3 (D12 coverage expansion, Stop 1 — always-readable):
 `InformationBarriers.{Policies, Segments}`,
 `Governance.{RoleGroups, RoleGroupMembers}`,
 `Legacy.{HoldPolicies, HoldRules, ExchangeDlpPolicies}`.
+
+Batch 3 (Stop 2 — role/licence-gated; a role failure records `AccessDenied`,
+never `Empty`):
+`InsiderRisk.Policies`,
+`CommunicationCompliance.{Policies, Rules}`,
+`Ediscovery.{Cases, CaseHoldPolicies, CaseHoldRules, Searches, SecurityFilters, CaseAdmins}`
+(enumeration of EXISTING objects only — the AST guard forbids the eDiscovery
+mutation verbs),
+`InformationProtection.{IrmConfig, RmsTemplates}`.
+
+**Opt-in mailbox sweep** (D12: off by default, aggregate-first):
+`Mailboxes.HoldSummary` runs only with `-IncludeMailboxHolds` and records COUNTS
+by hold state (`Metric`, `Value`, `Mailboxes`) — no user principal names in the
+default evidence. `Mailboxes.HoldDetail` additionally requires `-MailboxDetail`
+and emits one row per mailbox **including UPNs** — treat that output as
+confidential. Both record `NotAttempted` with the gating reason when their
+switches are absent. The sweep is tenant *state* rather than pure policy
+configuration; run-to-run deltas reflect mailbox population changes as well as
+configuration changes.
 
 Trainable classifiers, data connectors and Compliance Manager have no read cmdlet in
 SCC/EXO PowerShell and are documented gaps (D12), not areas. Transport rules are out

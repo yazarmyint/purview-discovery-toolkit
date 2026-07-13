@@ -52,6 +52,16 @@ Describe 'Read-only invariant (static AST guard): <Name>' -ForEach $scriptFiles 
         foreach ($c in $surface) { $c | Should -BeIn $allowed }
     }
 
+    It 'invokes no eDiscovery mutation cmdlets (batch 3: enumeration of EXISTING objects only)' {
+        # Explicit pin on top of the generic mutating-verb rule: the eDiscovery
+        # areas read existing cases/holds/searches and must never create, start,
+        # stop or export one.
+        $forbidden = @('New-ComplianceSearch', 'Start-ComplianceSearch', 'Stop-ComplianceSearch',
+                       'New-ComplianceSearchAction', 'New-ComplianceCase', 'Remove-ComplianceCase',
+                       'New-CaseHoldPolicy', 'New-CaseHoldRule', 'Set-CaseHoldPolicy')
+        foreach ($c in $forbidden) { $script:CmdNames | Should -Not -Contain $c }
+    }
+
     It 'export surface is exactly the known set (tenant reads + local serialization)' {
         # Export-Clixml is deliberately NOT allowed (removed per D10); reintroducing it
         # fails this test.

@@ -26,6 +26,21 @@ BeforeDiscovery {
         @{ Area = 'RetentionRecords.AppRetentionPolicies';    Cmdlet = 'Get-AppRetentionCompliancePolicy'; Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Enabled', 'Mode', 'Applications') }
         @{ Area = 'RetentionRecords.AppRetentionRules';       Cmdlet = 'Get-AppRetentionComplianceRule';   Key = @('Guid', 'Policy', 'Name'); Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Policy', 'RetentionDuration', 'RetentionComplianceAction', 'ExpirationDateOption') }
     )
+    # Batch 3 Stop 2 area specs: the RBAC/licence-gated areas. AccessDenied
+    # handling is the point - a role failure must classify, never read as Empty.
+    $script:Stop2Specs = @(
+        @{ Area = 'InsiderRisk.Policies';               Cmdlet = 'Get-InsiderRiskPolicy';           Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'Guid', 'InsiderRiskScenario') }
+        @{ Area = 'CommunicationCompliance.Policies';   Cmdlet = 'Get-SupervisoryReviewPolicyV2';   Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'Guid', 'Enabled') }
+        @{ Area = 'CommunicationCompliance.Rules';      Cmdlet = 'Get-SupervisoryReviewRule';       Key = @('Guid', 'Policy', 'Name'); Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'Guid', 'Policy', 'SamplingRate') }
+        @{ Area = 'Ediscovery.Cases';                   Cmdlet = 'Get-ComplianceCase';              Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'Guid', 'CaseType', 'Status') }
+        @{ Area = 'Ediscovery.CaseHoldPolicies';        Cmdlet = 'Get-CaseHoldPolicy';              Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'hp-aa';        Columns = @('Name', 'Guid', 'Enabled', 'Mode', 'CaseId') }
+        @{ Area = 'Ediscovery.CaseHoldRules';           Cmdlet = 'Get-CaseHoldRule';                Key = @('Guid', 'Policy', 'Name'); Count = 2; FirstProp = 'Name';       First = 'rule-hp-aa';   Columns = @('Name', 'Guid', 'Policy', 'ContentMatchQuery') }
+        @{ Area = 'Ediscovery.Searches';                Cmdlet = 'Get-ComplianceSearch';            Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'Guid', 'CaseName', 'ContentMatchQuery', 'Status') }
+        @{ Area = 'Ediscovery.SecurityFilters';         Cmdlet = 'Get-ComplianceSecurityFilter';    Key = @('FilterName');             Count = 2; FirstProp = 'FilterName'; First = 'aa';           Columns = @('FilterName', 'Users', 'Filters', 'Action', 'Description') }
+        @{ Area = 'Ediscovery.CaseAdmins';              Cmdlet = 'Get-eDiscoveryCaseAdmin';         Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'DisplayName') }
+        @{ Area = 'InformationProtection.IrmConfig';    Cmdlet = 'Get-IRMConfiguration';            Key = @('Identity');               Count = 1; FirstProp = 'Identity';   First = 'ControlPoint'; Columns = @('AzureRMSLicensingEnabled', 'InternalLicensingEnabled', 'ExternalLicensingEnabled', 'JournalReportDecryptionEnabled', 'SimplifiedClientAccessEnabled', 'TransportDecryptionSetting') }
+        @{ Area = 'InformationProtection.RmsTemplates'; Cmdlet = 'Get-RMSTemplate';                 Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';           Columns = @('Name', 'Guid', 'Description', 'Type') }
+    )
 }
 
 BeforeAll {
@@ -99,6 +114,16 @@ Describe 'Snapshot run - the full D9 status vocabulary end to end (integration)'
         # No Stop-1 stubs exist in this run: every batch-3 area must record the
         # absence durably, never crash or vanish.
         $script:AreasByName[$Area].status | Should -Be 'CmdletNotAvailable'
+    }
+    It 'absent cmdlet records CmdletNotAvailable: <Area>' -ForEach $script:Stop2Specs {
+        $script:AreasByName[$Area].status | Should -Be 'CmdletNotAvailable'
+    }
+    It 'the opt-in mailbox sweep records NotAttempted when its switch is absent (D12)' {
+        $s = $script:AreasByName['Mailboxes.HoldSummary']
+        $s.status | Should -Be 'NotAttempted'
+        $s.error  | Should -Match 'IncludeMailboxHolds'
+        $d = $script:AreasByName['Mailboxes.HoldDetail']
+        $d.status | Should -Be 'NotAttempted'
     }
     It 'the opt-in diagnostics ZIP records NotAttempted when the switch is absent (D6)' {
         $a = $script:AreasByName['Diagnostics.PurviewConfigZip']
@@ -365,6 +390,251 @@ Describe 'Batch 3 Stop 1 areas - a quiet tenant records Empty (valid negative ev
         $a = $script:S1EAreasByName[$Area]
         $a.status | Should -Be 'Empty'
         $a.count  | Should -Be 0
+    }
+}
+
+Describe 'Batch 3 Stop 2 areas - success path (gated areas, stable keys + views)' {
+    BeforeAll {
+        function Get-InsiderRiskPolicy {}
+        function Get-SupervisoryReviewPolicyV2 {}
+        function Get-SupervisoryReviewRule {}
+        function Get-ComplianceCase { param($CaseType) }
+        function Get-CaseHoldPolicy { param($Case) }
+        function Get-CaseHoldRule { param($Policy) }
+        function Get-ComplianceSearch {}
+        function Get-ComplianceSecurityFilter {}
+        function Get-eDiscoveryCaseAdmin {}
+        function Get-IRMConfiguration {}
+        function Get-RMSTemplate {}
+        $uniform = {
+            @([pscustomobject]@{ Guid = 'g2'; Name = 'zz'; Policy = 'P1' },
+              [pscustomobject]@{ Guid = 'g1'; Name = 'aa'; Policy = 'P1' })
+        }
+        foreach ($c in @('Get-InsiderRiskPolicy', 'Get-SupervisoryReviewPolicyV2', 'Get-SupervisoryReviewRule',
+                         'Get-ComplianceSearch', 'Get-eDiscoveryCaseAdmin', 'Get-RMSTemplate')) {
+            Mock -CommandName $c -MockWith $uniform
+        }
+        # Both case types are enumerated; only the core type has cases here.
+        Mock Get-ComplianceCase {
+            if ($CaseType -eq 'eDiscovery') {
+                @([pscustomobject]@{ Guid = 'g2'; Name = 'zz'; Identity = 'zz'; CaseType = 'eDiscovery' },
+                  [pscustomobject]@{ Guid = 'g1'; Name = 'aa'; Identity = 'aa'; CaseType = 'eDiscovery' })
+            } else { @() }
+        }
+        Mock Get-CaseHoldPolicy {
+            ,([pscustomobject]@{ Guid = "g-$Case"; Name = "hp-$Case"; Enabled = $true; Mode = 'Enforce' })
+        }
+        Mock Get-CaseHoldRule {
+            ,([pscustomobject]@{ Guid = "r-$Policy"; Name = "rule-$Policy"; Policy = "$Policy" })
+        }
+        Mock Get-ComplianceSecurityFilter {
+            @([pscustomobject]@{ FilterName = 'zz'; Action = 'All' },
+              [pscustomobject]@{ FilterName = 'aa'; Action = 'All' })
+        }
+        Mock Get-IRMConfiguration {
+            ,([pscustomobject]@{ Identity = 'ControlPoint'; AzureRMSLicensingEnabled = $true })
+        }
+        $script:S2Root = Join-Path $TestDrive 'stop2-success'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:S2Root -ReuseExistingSession *> $null
+        $script:S2RunDir = Get-RunDir $script:S2Root
+        $script:S2Snap = Read-Snapshot $script:S2RunDir
+        $script:S2AreasByName = @{}
+        foreach ($a in @($script:S2Snap.areas)) { $script:S2AreasByName[$a.area] = $a }
+    }
+    It 'records Success in composite stable-key order: <Area>' -ForEach $script:Stop2Specs {
+        $a = $script:S2AreasByName[$Area]
+        $a.status | Should -Be 'Success'
+        $a.count  | Should -Be $Count
+        @($a.stableKeyProperties) | Should -Be $Key
+        @($a.objects)[0].$FirstProp | Should -Be $First
+    }
+    It 'derives the view with the frozen columns: <Area>' -ForEach $script:Stop2Specs {
+        $vp = Join-Path (Join-Path $script:S2RunDir 'views') ($Area + '.csv')
+        Test-Path $vp | Should -BeTrue
+        $rows = @(Import-Csv $vp)
+        $rows.Count | Should -Be $Count
+        @($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) | Should -Be $Columns
+    }
+    It 'case holds enumerate per case and keep the policy linkage' {
+        $p = @($script:S2AreasByName['Ediscovery.CaseHoldPolicies'].objects)
+        @($p | ForEach-Object { $_.Name }) | Should -Be @('hp-aa', 'hp-zz')
+        $r = @($script:S2AreasByName['Ediscovery.CaseHoldRules'].objects)
+        $r[0].Policy | Should -Be 'hp-aa'
+    }
+}
+
+Describe 'Batch 3 Stop 2 areas - a gated role failure records AccessDenied, never Empty' {
+    BeforeAll {
+        function Get-InsiderRiskPolicy {}
+        function Get-SupervisoryReviewPolicyV2 {}
+        function Get-SupervisoryReviewRule {}
+        function Get-ComplianceCase { param($CaseType) }
+        function Get-CaseHoldPolicy { param($Case) }
+        function Get-CaseHoldRule { param($Policy) }
+        function Get-ComplianceSearch {}
+        function Get-ComplianceSecurityFilter {}
+        function Get-eDiscoveryCaseAdmin {}
+        function Get-IRMConfiguration {}
+        function Get-RMSTemplate {}
+        $denied = { throw 'Access is denied. A role assignment is required to read this configuration.' }
+        foreach ($c in @('Get-InsiderRiskPolicy', 'Get-SupervisoryReviewPolicyV2', 'Get-SupervisoryReviewRule',
+                         'Get-ComplianceCase', 'Get-CaseHoldPolicy', 'Get-CaseHoldRule', 'Get-ComplianceSearch',
+                         'Get-ComplianceSecurityFilter', 'Get-eDiscoveryCaseAdmin', 'Get-IRMConfiguration',
+                         'Get-RMSTemplate')) {
+            Mock -CommandName $c -MockWith $denied
+        }
+        # One gated area exercises the 5b path: the role failure arrives as a
+        # NON-terminating error (EXO proxy-module mechanism), not a throw.
+        Mock Get-InsiderRiskPolicy {
+            $ErrorActionPreference = 'Continue'
+            Write-Error 'Access is denied. A role assignment is required to read this configuration.'
+        }
+        # -IncludeMailboxHolds is ON here but Get-EXOMailbox is absent: the sweep
+        # must record the missing cmdlet, and detail stays NotAttempted.
+        $script:S2DRoot = Join-Path $TestDrive 'stop2-denied'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:S2DRoot `
+            -IncludeMailboxHolds -ReuseExistingSession *> $null
+        $script:S2DSnap = Read-Snapshot (Get-RunDir $script:S2DRoot)
+        $script:S2DAreasByName = @{}
+        foreach ($a in @($script:S2DSnap.areas)) { $script:S2DAreasByName[$a.area] = $a }
+    }
+    It 'records AccessDenied: <Area>' -ForEach $script:Stop2Specs {
+        $a = $script:S2DAreasByName[$Area]
+        $a.status | Should -Be 'AccessDenied'
+        $a.count  | Should -Be 0
+    }
+    It 'a gated non-terminating role error also classifies AccessDenied (EXO proxy mechanism)' {
+        # Belt and braces for the gated set: the 5b error-stream path, not a throw.
+        $a = $script:S2DAreasByName['InsiderRisk.Policies']
+        $a.error | Should -Match '(?i)role assignment'
+    }
+    It 'the enabled mailbox sweep without the cmdlet records CmdletNotAvailable; detail stays NotAttempted' {
+        $script:S2DAreasByName['Mailboxes.HoldSummary'].status | Should -Be 'CmdletNotAvailable'
+        $script:S2DAreasByName['Mailboxes.HoldDetail'].status  | Should -Be 'NotAttempted'
+    }
+}
+
+Describe 'Batch 3 Stop 2 areas - a quiet tenant records Empty (valid negative evidence)' {
+    BeforeAll {
+        function Get-InsiderRiskPolicy {}
+        function Get-SupervisoryReviewPolicyV2 {}
+        function Get-SupervisoryReviewRule {}
+        function Get-ComplianceCase { param($CaseType) }
+        function Get-CaseHoldPolicy { param($Case) }
+        function Get-CaseHoldRule { param($Policy) }
+        function Get-ComplianceSearch {}
+        function Get-ComplianceSecurityFilter {}
+        function Get-eDiscoveryCaseAdmin {}
+        function Get-IRMConfiguration {}
+        function Get-RMSTemplate {}
+        $none = { @() }
+        foreach ($c in @('Get-InsiderRiskPolicy', 'Get-SupervisoryReviewPolicyV2', 'Get-SupervisoryReviewRule',
+                         'Get-ComplianceCase', 'Get-CaseHoldPolicy', 'Get-CaseHoldRule', 'Get-ComplianceSearch',
+                         'Get-ComplianceSecurityFilter', 'Get-eDiscoveryCaseAdmin', 'Get-IRMConfiguration',
+                         'Get-RMSTemplate')) {
+            Mock -CommandName $c -MockWith $none
+        }
+        $script:S2ERoot = Join-Path $TestDrive 'stop2-empty'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:S2ERoot -ReuseExistingSession *> $null
+        $script:S2ESnap = Read-Snapshot (Get-RunDir $script:S2ERoot)
+        $script:S2EAreasByName = @{}
+        foreach ($a in @($script:S2ESnap.areas)) { $script:S2EAreasByName[$a.area] = $a }
+    }
+    It 'records Empty with count 0: <Area>' -ForEach $script:Stop2Specs {
+        $a = $script:S2EAreasByName[$Area]
+        $a.status | Should -Be 'Empty'
+        $a.count  | Should -Be 0
+    }
+}
+
+Describe 'Opt-in mailbox sweep (D12: off by default, aggregate-first)' {
+    BeforeAll {
+        function Get-EXOMailbox { param($ResultSize, $Properties) }
+        Mock Get-EXOMailbox {
+            @([pscustomobject]@{ UserPrincipalName = 'u1@contoso.example'; LitigationHoldEnabled = $true
+                                 InPlaceHolds = @('hold1'); ComplianceTagHoldApplied = $false; DelayHoldApplied = $false
+                                 RetentionHoldEnabled = $true; RetentionPolicy = 'Default MRM Policy'; AuditEnabled = $true },
+              [pscustomobject]@{ UserPrincipalName = 'u2@contoso.example'; LitigationHoldEnabled = $true
+                                 InPlaceHolds = @(); ComplianceTagHoldApplied = $false; DelayHoldApplied = $false
+                                 RetentionHoldEnabled = $false; RetentionPolicy = 'Default MRM Policy'; AuditEnabled = $true },
+              [pscustomobject]@{ UserPrincipalName = 'u3@contoso.example'; LitigationHoldEnabled = $false
+                                 InPlaceHolds = @(); ComplianceTagHoldApplied = $true; DelayHoldApplied = $false
+                                 RetentionHoldEnabled = $false; RetentionPolicy = $null; AuditEnabled = $false })
+        }
+        $script:MbRoot = Join-Path $TestDrive 'mbx-aggregate'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:MbRoot `
+            -IncludeMailboxHolds -ReuseExistingSession *> $null
+        $script:MbRunDir = Get-RunDir $script:MbRoot
+        $script:MbSnap = Read-Snapshot $script:MbRunDir
+        $script:MbAreas = @{}
+        foreach ($a in @($script:MbSnap.areas)) { $script:MbAreas[$a.area] = $a }
+        function Get-SummaryCount([string]$Metric, [string]$Value) {
+            $row = @($script:MbAreas['Mailboxes.HoldSummary'].objects) |
+                Where-Object { $_.Metric -eq $Metric -and $_.Value -eq $Value }
+            [int]$row.Mailboxes
+        }
+    }
+    It 'aggregates hold state as counts, keyed Metric|Value' {
+        $a = $script:MbAreas['Mailboxes.HoldSummary']
+        $a.status | Should -Be 'Success'
+        @($a.stableKeyProperties) | Should -Be @('Metric', 'Value')
+        Get-SummaryCount 'TotalMailboxes' 'All'            | Should -Be 3
+        Get-SummaryCount 'LitigationHoldEnabled' 'True'    | Should -Be 2
+        Get-SummaryCount 'LitigationHoldEnabled' 'False'   | Should -Be 1
+        Get-SummaryCount 'HasInPlaceHolds' 'True'          | Should -Be 1
+        Get-SummaryCount 'RetentionHoldEnabled' 'True'     | Should -Be 1
+        Get-SummaryCount 'ComplianceTagHoldApplied' 'True' | Should -Be 1
+        Get-SummaryCount 'AuditEnabled' 'False'            | Should -Be 1
+        Get-SummaryCount 'RetentionPolicy' 'Default MRM Policy' | Should -Be 2
+        Get-SummaryCount 'RetentionPolicy' '(none)'        | Should -Be 1
+    }
+    It 'the aggregate puts no user principal names into evidence' {
+        foreach ($o in @($script:MbAreas['Mailboxes.HoldSummary'].objects)) {
+            @($o.PSObject.Properties | ForEach-Object { $_.Name }) | Should -Be @('Metric', 'Value', 'Mailboxes')
+        }
+        $raw = Get-Content -Raw (Join-Path $script:MbRunDir 'snapshot.json')
+        $raw | Should -Not -Match 'u1@contoso\.example'
+    }
+    It 'per-mailbox detail stays NotAttempted without -MailboxDetail' {
+        $script:MbAreas['Mailboxes.HoldDetail'].status | Should -Be 'NotAttempted'
+        $script:MbAreas['Mailboxes.HoldDetail'].error  | Should -Match 'MailboxDetail'
+    }
+}
+
+Describe 'Opt-in mailbox sweep - per-mailbox detail (second switch)' {
+    BeforeAll {
+        function Get-EXOMailbox { param($ResultSize, $Properties) }
+        Mock Get-EXOMailbox {
+            @([pscustomobject]@{ UserPrincipalName = 'u2@contoso.example'; LitigationHoldEnabled = $true
+                                 InPlaceHolds = @(); ComplianceTagHoldApplied = $false; DelayHoldApplied = $false
+                                 RetentionHoldEnabled = $false; RetentionPolicy = 'Default MRM Policy'; AuditEnabled = $true },
+              [pscustomobject]@{ UserPrincipalName = 'u1@contoso.example'; LitigationHoldEnabled = $true
+                                 InPlaceHolds = @('hold1'); ComplianceTagHoldApplied = $false; DelayHoldApplied = $false
+                                 RetentionHoldEnabled = $true; RetentionPolicy = 'Default MRM Policy'; AuditEnabled = $true })
+        }
+        $script:MbDRoot = Join-Path $TestDrive 'mbx-detail'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:MbDRoot `
+            -IncludeMailboxHolds -MailboxDetail -ReuseExistingSession *> $null
+        $script:MbDRunDir = Get-RunDir $script:MbDRoot
+        $script:MbDSnap = Read-Snapshot $script:MbDRunDir
+        $script:MbDAreas = @{}
+        foreach ($a in @($script:MbDSnap.areas)) { $script:MbDAreas[$a.area] = $a }
+    }
+    It 'emits per-mailbox rows keyed by UserPrincipalName, and the aggregate too' {
+        $d = $script:MbDAreas['Mailboxes.HoldDetail']
+        $d.status | Should -Be 'Success'
+        $d.count  | Should -Be 2
+        @($d.stableKeyProperties) | Should -Be @('UserPrincipalName')
+        @($d.objects)[0].UserPrincipalName | Should -Be 'u1@contoso.example'
+        $script:MbDAreas['Mailboxes.HoldSummary'].status | Should -Be 'Success'
+    }
+    It 'derives the detail view with the frozen columns' {
+        $vp = Join-Path (Join-Path $script:MbDRunDir 'views') 'Mailboxes.HoldDetail.csv'
+        Test-Path $vp | Should -BeTrue
+        $rows = @(Import-Csv $vp)
+        @($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) |
+            Should -Be @('UserPrincipalName', 'LitigationHoldEnabled', 'RetentionHoldEnabled', 'ComplianceTagHoldApplied', 'DelayHoldApplied', 'InPlaceHolds', 'RetentionPolicy', 'AuditEnabled')
+        ($rows | Where-Object { $_.UserPrincipalName -eq 'u1@contoso.example' }).InPlaceHolds | Should -Be 'hold1'
     }
 }
 

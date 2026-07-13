@@ -11,12 +11,15 @@ modify tenant state.
 
 ## ⚠️ This toolkit generates sensitive data — read before running
 
-Two of the scripts return **item-level metadata**, not just counts:
+Some collection modes return **item-level metadata**, not just counts:
 
 - **Content Explorer inventory (`-Detailed` mode)** returns file names, document URLs,
   site URLs, and user principal names for every matching item.
 - **Audit-log export** returns per-event detail including object IDs (file/message
   identifiers), user IDs, and policy/SIT match details.
+- **Mailbox hold sweep (`-IncludeMailboxHolds -MailboxDetail`)** returns one row per
+  mailbox including user principal names. Without `-MailboxDetail`, the sweep records
+  aggregate counts only (no UPNs); without `-IncludeMailboxHolds` it does not run at all.
 
 On a regulated tenant (healthcare, finance, government), this metadata can itself be
 sensitive — a file path or mailbox UPN is identifying even without the file contents.
@@ -83,6 +86,11 @@ The collection scripts take a `-UserPrincipalName` and write under `-OutputRoot`
 via their parameters. Script A also accepts an optional `-SnapshotLabel` (e.g.
 `Baseline`, `Closeout`) that is stamped into the snapshot's provenance — useful when
 you will later compare a start-of-engagement snapshot with an end-of-engagement one.
+
+Script A's optional **per-mailbox hold sweep** is off by default: `-IncludeMailboxHolds`
+records aggregate counts by hold state (litigation hold, retention hold, in-place holds,
+compliance-tag hold, delay hold, MRM policy assignment, mailbox auditing); adding
+`-MailboxDetail` opts into per-mailbox rows (includes UPNs — see the warning above).
 
 The **report** script (E) carries the labeling you'll want to change:
 

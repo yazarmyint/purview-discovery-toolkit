@@ -22,6 +22,11 @@ param(
     # Optional engagement label stamped into provenance (e.g. Baseline, Closeout).
     [string]$SnapshotLabel = '',
     [switch]$IncludePurviewConfigZip,
+    # Opt-in per-mailbox hold sweep (D12: off by default, aggregate-first). The
+    # default aggregate records COUNTS by hold state - no user principal names.
+    [switch]$IncludeMailboxHolds,
+    # Second opt-in: per-mailbox rows (includes UPNs - treat output as confidential).
+    [switch]$MailboxDetail,
     [switch]$ReuseExistingSession
 )
 $ErrorActionPreference = 'Stop'
@@ -90,6 +95,19 @@ $script:AreaCsvViews = @{
     'Legacy.ExchangeDlpPolicies'               = @('Name', 'Guid', 'State', 'Mode', 'Description')
     'RetentionRecords.AppRetentionPolicies'    = @('Name', 'Guid', 'Enabled', 'Mode', 'Applications')
     'RetentionRecords.AppRetentionRules'       = @('Name', 'Guid', 'Policy', 'RetentionDuration', 'RetentionComplianceAction', 'ExpirationDateOption')
+    'InsiderRisk.Policies'                     = @('Name', 'Guid', 'InsiderRiskScenario')
+    'CommunicationCompliance.Policies'         = @('Name', 'Guid', 'Enabled')
+    'CommunicationCompliance.Rules'            = @('Name', 'Guid', 'Policy', 'SamplingRate')
+    'Ediscovery.Cases'                         = @('Name', 'Guid', 'CaseType', 'Status')
+    'Ediscovery.CaseHoldPolicies'              = @('Name', 'Guid', 'Enabled', 'Mode', 'CaseId')
+    'Ediscovery.CaseHoldRules'                 = @('Name', 'Guid', 'Policy', 'ContentMatchQuery')
+    'Ediscovery.Searches'                      = @('Name', 'Guid', 'CaseName', 'ContentMatchQuery', 'Status')
+    'Ediscovery.SecurityFilters'               = @('FilterName', 'Users', 'Filters', 'Action', 'Description')
+    'Ediscovery.CaseAdmins'                    = @('Name', 'DisplayName')
+    'InformationProtection.IrmConfig'          = @('AzureRMSLicensingEnabled', 'InternalLicensingEnabled', 'ExternalLicensingEnabled', 'JournalReportDecryptionEnabled', 'SimplifiedClientAccessEnabled', 'TransportDecryptionSetting')
+    'InformationProtection.RmsTemplates'       = @('Name', 'Guid', 'Description', 'Type')
+    'Mailboxes.HoldSummary'                    = @('Metric', 'Value', 'Mailboxes')
+    'Mailboxes.HoldDetail'                     = @('UserPrincipalName', 'LitigationHoldEnabled', 'RetentionHoldEnabled', 'ComplianceTagHoldApplied', 'DelayHoldApplied', 'InPlaceHolds', 'RetentionPolicy', 'AuditEnabled')
 }
 
 # Registers an envelope and prints its one-line outcome.
@@ -118,6 +136,10 @@ Trace-Area (Get-SnapshotArea -Area 'InformationProtection.LabelPolicies' -Cmdlet
 Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelPolicies' -Cmdlet 'Get-AutoSensitivityLabelPolicy' -Collect { Get-AutoSensitivityLabelPolicy })
 Trace-Area (Get-SnapshotArea -Area 'InformationProtection.AutoLabelRules' -Cmdlet 'Get-AutoSensitivityLabelRule' `
     -StableKeyProperty @('Guid', 'ParentPolicyName', 'Name') -Collect { Get-AutoSensitivityLabelRule })
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.IrmConfig' -Cmdlet 'Get-IRMConfiguration' `
+    -StableKeyProperty @('Identity') -Collect { Get-IRMConfiguration })
+Trace-Area (Get-SnapshotArea -Area 'InformationProtection.RmsTemplates' -Cmdlet 'Get-RMSTemplate' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-RMSTemplate })
 
 # === Classification ==========================================================
 Trace-Area (Get-SnapshotArea -Area 'Classification.SensitiveInformationTypes' -Cmdlet 'Get-DlpSensitiveInformationType' -Collect { Get-DlpSensitiveInformationType })
@@ -260,6 +282,81 @@ Trace-Area (Get-SnapshotArea -Area 'Legacy.HoldRules' -Cmdlet 'Get-HoldComplianc
 # Legacy EXO DLP (distinct from Get-DlpCompliancePolicy).
 Trace-Area (Get-SnapshotArea -Area 'Legacy.ExchangeDlpPolicies' -Cmdlet 'Get-DlpPolicy' `
     -StableKeyProperty @('Guid', 'Name') -Collect { Get-DlpPolicy })
+
+# === Insider risk & communication compliance (role/licence-gated) ===========
+# On accounts without the corresponding role, the wrapper records AccessDenied -
+# a durable, classified record instead of a crash or a false Empty.
+Trace-Area (Get-SnapshotArea -Area 'InsiderRisk.Policies' -Cmdlet 'Get-InsiderRiskPolicy' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-InsiderRiskPolicy })
+Trace-Area (Get-SnapshotArea -Area 'CommunicationCompliance.Policies' -Cmdlet 'Get-SupervisoryReviewPolicyV2' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-SupervisoryReviewPolicyV2 })
+Trace-Area (Get-SnapshotArea -Area 'CommunicationCompliance.Rules' -Cmdlet 'Get-SupervisoryReviewRule' `
+    -StableKeyProperty @('Guid', 'Policy', 'Name') -Collect { Get-SupervisoryReviewRule })
+
+# === eDiscovery metadata (gated; enumeration of EXISTING objects only) =======
+# Read-only: cases, holds, searches, security filters and case admins are LISTED,
+# never created, started or exported (pinned by the AST guard).
+Trace-Area (Get-SnapshotArea -Area 'Ediscovery.Cases' -Cmdlet 'Get-ComplianceCase' `
+    -StableKeyProperty @('Guid', 'Name') -Collect {
+        @(Get-ComplianceCase -CaseType eDiscovery) + @(Get-ComplianceCase -CaseType AdvancedEdiscovery)
+    })
+Trace-Area (Get-SnapshotArea -Area 'Ediscovery.CaseHoldPolicies' -Cmdlet @('Get-ComplianceCase', 'Get-CaseHoldPolicy') `
+    -StableKeyProperty @('Guid', 'Name') -Collect {
+        foreach ($case in @(@(Get-ComplianceCase -CaseType eDiscovery) + @(Get-ComplianceCase -CaseType AdvancedEdiscovery))) {
+            Get-CaseHoldPolicy -Case "$($case.Identity)"
+        }
+    })
+Trace-Area (Get-SnapshotArea -Area 'Ediscovery.CaseHoldRules' -Cmdlet @('Get-ComplianceCase', 'Get-CaseHoldPolicy', 'Get-CaseHoldRule') `
+    -StableKeyProperty @('Guid', 'Policy', 'Name') -Collect {
+        foreach ($case in @(@(Get-ComplianceCase -CaseType eDiscovery) + @(Get-ComplianceCase -CaseType AdvancedEdiscovery))) {
+            foreach ($p in @(Get-CaseHoldPolicy -Case "$($case.Identity)")) {
+                Get-CaseHoldRule -Policy "$($p.Name)"
+            }
+        }
+    })
+Trace-Area (Get-SnapshotArea -Area 'Ediscovery.Searches' -Cmdlet 'Get-ComplianceSearch' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-ComplianceSearch })
+Trace-Area (Get-SnapshotArea -Area 'Ediscovery.SecurityFilters' -Cmdlet 'Get-ComplianceSecurityFilter' `
+    -StableKeyProperty @('FilterName') -Collect { Get-ComplianceSecurityFilter })
+Trace-Area (Get-SnapshotArea -Area 'Ediscovery.CaseAdmins' -Cmdlet 'Get-eDiscoveryCaseAdmin' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-eDiscoveryCaseAdmin })
+
+# === Mailboxes (opt-in sweep; D12: off by default, aggregate-first) ==========
+Trace-Area (Get-SnapshotArea -Area 'Mailboxes.HoldSummary' -Cmdlet 'Get-EXOMailbox' `
+    -StableKeyProperty @('Metric', 'Value') `
+    -Skip:(-not $IncludeMailboxHolds) -SkipReason 'IncludeMailboxHolds not set' `
+    -Collect {
+        Get-EXOMailbox -ResultSize Unlimited -Properties LitigationHoldEnabled, InPlaceHolds,
+            ComplianceTagHoldApplied, DelayHoldApplied, RetentionHoldEnabled, RetentionPolicy, AuditEnabled
+    } `
+    -Process {
+        param($mbx)
+        # Aggregate-first (D12): counts by hold state. No user principal names in
+        # the default evidence.
+        $rows = [System.Collections.Generic.List[object]]::new()
+        $rows.Add([pscustomobject][ordered]@{ Metric = 'TotalMailboxes'; Value = 'All'; Mailboxes = [int]@($mbx).Count })
+        foreach ($metric in @('LitigationHoldEnabled', 'ComplianceTagHoldApplied', 'DelayHoldApplied',
+                              'RetentionHoldEnabled', 'AuditEnabled')) {
+            foreach ($g in @(@($mbx) | Group-Object { "$($_.$metric)" })) {
+                $rows.Add([pscustomobject][ordered]@{ Metric = $metric; Value = "$($g.Name)"; Mailboxes = [int]$g.Count })
+            }
+        }
+        foreach ($g in @(@($mbx) | Group-Object { if (@($_.InPlaceHolds).Count -gt 0) { 'True' } else { 'False' } })) {
+            $rows.Add([pscustomobject][ordered]@{ Metric = 'HasInPlaceHolds'; Value = "$($g.Name)"; Mailboxes = [int]$g.Count })
+        }
+        foreach ($g in @(@($mbx) | Group-Object { $v = "$($_.RetentionPolicy)"; if ($v -eq '') { '(none)' } else { $v } })) {
+            $rows.Add([pscustomobject][ordered]@{ Metric = 'RetentionPolicy'; Value = "$($g.Name)"; Mailboxes = [int]$g.Count })
+        }
+        @{ Objects = $rows.ToArray() }
+    })
+# Per-mailbox rows carry UPNs: separate second opt-in (treat output confidential).
+Trace-Area (Get-SnapshotArea -Area 'Mailboxes.HoldDetail' -Cmdlet 'Get-EXOMailbox' `
+    -StableKeyProperty @('UserPrincipalName') `
+    -Skip:(-not ($IncludeMailboxHolds -and $MailboxDetail)) -SkipReason 'MailboxDetail not set (per-mailbox rows are opt-in)' `
+    -Collect {
+        Get-EXOMailbox -ResultSize Unlimited -Properties LitigationHoldEnabled, InPlaceHolds,
+            ComplianceTagHoldApplied, DelayHoldApplied, RetentionHoldEnabled, RetentionPolicy, AuditEnabled
+    })
 
 # === Diagnostics (opt-in, out-of-band corroborating evidence; D5/D6) =========
 Trace-Area (Get-SnapshotArea -Area 'Diagnostics.PurviewConfigZip' -Cmdlet 'Export-PurviewConfig' -DiffExcluded `
