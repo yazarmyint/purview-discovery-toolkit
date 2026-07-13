@@ -5,6 +5,29 @@
 # the wrapper's CommandNotFound handling records CmdletNotAvailable without touching
 # any tenant. Collect blocks are bound to the script session, so stubs + mocks work.
 
+BeforeDiscovery {
+    # Batch 3 Stop 1 area specs: one row per always-readable area. Drives the
+    # uniform status-path tests (Success / AccessDenied / CmdletNotAvailable /
+    # Empty) and pins each area's composite stable key and frozen view columns.
+    $script:Stop1Specs = @(
+        @{ Area = 'ExchangeCompliance.MrmPolicies';           Cmdlet = 'Get-RetentionPolicy';              Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'RetentionPolicyTagLinks', 'IsDefault') }
+        @{ Area = 'ExchangeCompliance.MrmTags';               Cmdlet = 'Get-RetentionPolicyTag';           Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Type', 'AgeLimitForRetention', 'RetentionAction', 'RetentionEnabled', 'MessageClass') }
+        @{ Area = 'ExchangeCompliance.JournalRules';          Cmdlet = 'Get-JournalRule';                  Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Enabled', 'Scope', 'Recipient', 'JournalEmailAddress') }
+        @{ Area = 'Alerts.ProtectionAlerts';                  Cmdlet = 'Get-ProtectionAlert';              Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Disabled', 'Category', 'Severity', 'ThreatType', 'Operation', 'NotifyUser', 'AggregationType') }
+        @{ Area = 'Alerts.ActivityAlerts';                    Cmdlet = 'Get-ActivityAlert';                Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Disabled', 'Type', 'Category', 'Operation', 'NotifyUser') }
+        @{ Area = 'InformationBarriers.Policies';             Cmdlet = 'Get-InformationBarrierPolicy';     Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'State', 'AssignedSegment', 'SegmentsAllowed', 'SegmentsBlocked') }
+        @{ Area = 'InformationBarriers.Segments';             Cmdlet = 'Get-OrganizationSegment';          Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'UserGroupFilter') }
+        @{ Area = 'Classification.KeywordDictionaries';       Cmdlet = 'Get-DlpKeywordDictionary';         Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Identity', 'Description') }
+        @{ Area = 'Governance.RoleGroups';                    Cmdlet = 'Get-RoleGroup';                    Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'RG-A'; Columns = @('Name', 'Guid', 'DisplayName', 'Description', 'Roles') }
+        @{ Area = 'Governance.RoleGroupMembers';              Cmdlet = 'Get-RoleGroup';                    Key = @('RoleGroup', 'MemberName'); Count = 4; FirstProp = 'MemberName'; First = 'm-aa'; Columns = @('RoleGroup', 'MemberName', 'DisplayName', 'MemberGuid', 'RecipientType') }
+        @{ Area = 'Legacy.HoldPolicies';                      Cmdlet = 'Get-HoldCompliancePolicy';         Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Enabled', 'Mode', 'Workload') }
+        @{ Area = 'Legacy.HoldRules';                         Cmdlet = 'Get-HoldComplianceRule';           Key = @('Guid', 'Policy', 'Name'); Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Policy', 'Disabled', 'HoldContent', 'HoldDurationDisplayHint') }
+        @{ Area = 'Legacy.ExchangeDlpPolicies';               Cmdlet = 'Get-DlpPolicy';                    Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'State', 'Mode', 'Description') }
+        @{ Area = 'RetentionRecords.AppRetentionPolicies';    Cmdlet = 'Get-AppRetentionCompliancePolicy'; Key = @('Guid', 'Name');           Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Enabled', 'Mode', 'Applications') }
+        @{ Area = 'RetentionRecords.AppRetentionRules';       Cmdlet = 'Get-AppRetentionComplianceRule';   Key = @('Guid', 'Policy', 'Name'); Count = 2; FirstProp = 'Name';       First = 'aa';   Columns = @('Name', 'Guid', 'Policy', 'RetentionDuration', 'RetentionComplianceAction', 'ExpirationDateOption') }
+    )
+}
+
 BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     $script:ScriptPath = Join-Path (Join-Path $repoRoot 'scripts') 'Invoke-PurviewSourceDiscovery.ps1'
@@ -71,6 +94,11 @@ Describe 'Snapshot run - the full D9 status vocabulary end to end (integration)'
         $script:AreasByName['Dlp.Policies'].status                    | Should -Be 'CmdletNotAvailable'
         $script:AreasByName['Classification.SitRulePackages'].status | Should -Be 'CmdletNotAvailable'
         $script:AreasByName['Classification.EdmSchemas'].status      | Should -Be 'CmdletNotAvailable'
+    }
+    It 'absent cmdlet records CmdletNotAvailable: <Area>' -ForEach $script:Stop1Specs {
+        # No Stop-1 stubs exist in this run: every batch-3 area must record the
+        # absence durably, never crash or vanish.
+        $script:AreasByName[$Area].status | Should -Be 'CmdletNotAvailable'
     }
     It 'the opt-in diagnostics ZIP records NotAttempted when the switch is absent (D6)' {
         $a = $script:AreasByName['Diagnostics.PurviewConfigZip']
@@ -193,6 +221,150 @@ Describe 'Non-terminating cmdlet errors record failure statuses, never Empty (sa
         $a.status | Should -Be 'Failed'
         $a.count  | Should -Be 0
         $a.error  | Should -Match 'Exchange Online Protection'
+    }
+}
+
+Describe 'Batch 3 Stop 1 areas - success path (stable keys + derived views)' {
+    BeforeAll {
+        # Uniform two-object sample: g1/aa must sort before g2/zz under every
+        # declared composite key. Policy feeds the rule-area composites.
+        function Get-RetentionPolicy {}
+        function Get-RetentionPolicyTag {}
+        function Get-JournalRule {}
+        function Get-ProtectionAlert {}
+        function Get-ActivityAlert {}
+        function Get-InformationBarrierPolicy {}
+        function Get-OrganizationSegment {}
+        function Get-DlpKeywordDictionary {}
+        function Get-HoldCompliancePolicy {}
+        function Get-HoldComplianceRule {}
+        function Get-DlpPolicy {}
+        function Get-AppRetentionCompliancePolicy {}
+        function Get-AppRetentionComplianceRule {}
+        function Get-RoleGroup {}
+        function Get-RoleGroupMember { param($Identity) }
+        $uniform = {
+            @([pscustomobject]@{ Guid = 'g2'; Name = 'zz'; Policy = 'P1' },
+              [pscustomobject]@{ Guid = 'g1'; Name = 'aa'; Policy = 'P1' })
+        }
+        foreach ($c in @('Get-RetentionPolicy', 'Get-RetentionPolicyTag', 'Get-JournalRule',
+                         'Get-ProtectionAlert', 'Get-ActivityAlert', 'Get-InformationBarrierPolicy',
+                         'Get-OrganizationSegment', 'Get-DlpKeywordDictionary', 'Get-HoldCompliancePolicy',
+                         'Get-HoldComplianceRule', 'Get-DlpPolicy', 'Get-AppRetentionCompliancePolicy',
+                         'Get-AppRetentionComplianceRule')) {
+            Mock -CommandName $c -MockWith $uniform
+        }
+        Mock Get-RoleGroup {
+            @([pscustomobject]@{ Guid = 'g2'; Name = 'RG-B'; Identity = 'RG-B' },
+              [pscustomobject]@{ Guid = 'g1'; Name = 'RG-A'; Identity = 'RG-A' })
+        }
+        Mock Get-RoleGroupMember {
+            @([pscustomobject]@{ Name = 'm-zz'; DisplayName = 'M ZZ'; Guid = 'mg2'; RecipientType = 'UserMailbox' },
+              [pscustomobject]@{ Name = 'm-aa'; DisplayName = 'M AA'; Guid = 'mg1'; RecipientType = 'Group' })
+        }
+        $script:S1Root = Join-Path $TestDrive 'stop1-success'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:S1Root -ReuseExistingSession *> $null
+        $script:S1RunDir = Get-RunDir $script:S1Root
+        $script:S1Snap = Read-Snapshot $script:S1RunDir
+        $script:S1AreasByName = @{}
+        foreach ($a in @($script:S1Snap.areas)) { $script:S1AreasByName[$a.area] = $a }
+    }
+    It 'records Success in composite stable-key order: <Area>' -ForEach $script:Stop1Specs {
+        $a = $script:S1AreasByName[$Area]
+        $a.status | Should -Be 'Success'
+        $a.count  | Should -Be $Count
+        @($a.stableKeyProperties) | Should -Be $Key
+        @($a.objects)[0].$FirstProp | Should -Be $First
+    }
+    It 'derives the view with the frozen columns: <Area>' -ForEach $script:Stop1Specs {
+        $vp = Join-Path (Join-Path $script:S1RunDir 'views') ($Area + '.csv')
+        Test-Path $vp | Should -BeTrue
+        $rows = @(Import-Csv $vp)
+        $rows.Count | Should -Be $Count
+        @($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) | Should -Be $Columns
+    }
+    It 'role-group membership rows carry the group context (descriptor shape)' {
+        $o = @($script:S1AreasByName['Governance.RoleGroupMembers'].objects)[0]
+        $o.RoleGroup     | Should -Be 'RG-A'
+        $o.MemberName    | Should -Be 'm-aa'
+        $o.MemberGuid    | Should -Be 'mg1'
+        $o.RecipientType | Should -Be 'Group'
+    }
+}
+
+Describe 'Batch 3 Stop 1 areas - a role failure records AccessDenied, never Empty' {
+    BeforeAll {
+        function Get-RetentionPolicy {}
+        function Get-RetentionPolicyTag {}
+        function Get-JournalRule {}
+        function Get-ProtectionAlert {}
+        function Get-ActivityAlert {}
+        function Get-InformationBarrierPolicy {}
+        function Get-OrganizationSegment {}
+        function Get-DlpKeywordDictionary {}
+        function Get-HoldCompliancePolicy {}
+        function Get-HoldComplianceRule {}
+        function Get-DlpPolicy {}
+        function Get-AppRetentionCompliancePolicy {}
+        function Get-AppRetentionComplianceRule {}
+        function Get-RoleGroup {}
+        function Get-RoleGroupMember { param($Identity) }
+        $denied = { throw 'Access is denied. Check role assignments.' }
+        foreach ($c in @('Get-RetentionPolicy', 'Get-RetentionPolicyTag', 'Get-JournalRule',
+                         'Get-ProtectionAlert', 'Get-ActivityAlert', 'Get-InformationBarrierPolicy',
+                         'Get-OrganizationSegment', 'Get-DlpKeywordDictionary', 'Get-HoldCompliancePolicy',
+                         'Get-HoldComplianceRule', 'Get-DlpPolicy', 'Get-AppRetentionCompliancePolicy',
+                         'Get-AppRetentionComplianceRule', 'Get-RoleGroup', 'Get-RoleGroupMember')) {
+            Mock -CommandName $c -MockWith $denied
+        }
+        $script:S1DRoot = Join-Path $TestDrive 'stop1-denied'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:S1DRoot -ReuseExistingSession *> $null
+        $script:S1DSnap = Read-Snapshot (Get-RunDir $script:S1DRoot)
+        $script:S1DAreasByName = @{}
+        foreach ($a in @($script:S1DSnap.areas)) { $script:S1DAreasByName[$a.area] = $a }
+    }
+    It 'records AccessDenied: <Area>' -ForEach $script:Stop1Specs {
+        $a = $script:S1DAreasByName[$Area]
+        $a.status | Should -Be 'AccessDenied'
+        $a.count  | Should -Be 0
+    }
+}
+
+Describe 'Batch 3 Stop 1 areas - a quiet tenant records Empty (valid negative evidence)' {
+    BeforeAll {
+        function Get-RetentionPolicy {}
+        function Get-RetentionPolicyTag {}
+        function Get-JournalRule {}
+        function Get-ProtectionAlert {}
+        function Get-ActivityAlert {}
+        function Get-InformationBarrierPolicy {}
+        function Get-OrganizationSegment {}
+        function Get-DlpKeywordDictionary {}
+        function Get-HoldCompliancePolicy {}
+        function Get-HoldComplianceRule {}
+        function Get-DlpPolicy {}
+        function Get-AppRetentionCompliancePolicy {}
+        function Get-AppRetentionComplianceRule {}
+        function Get-RoleGroup {}
+        function Get-RoleGroupMember { param($Identity) }
+        $none = { @() }
+        foreach ($c in @('Get-RetentionPolicy', 'Get-RetentionPolicyTag', 'Get-JournalRule',
+                         'Get-ProtectionAlert', 'Get-ActivityAlert', 'Get-InformationBarrierPolicy',
+                         'Get-OrganizationSegment', 'Get-DlpKeywordDictionary', 'Get-HoldCompliancePolicy',
+                         'Get-HoldComplianceRule', 'Get-DlpPolicy', 'Get-AppRetentionCompliancePolicy',
+                         'Get-AppRetentionComplianceRule', 'Get-RoleGroup', 'Get-RoleGroupMember')) {
+            Mock -CommandName $c -MockWith $none
+        }
+        $script:S1ERoot = Join-Path $TestDrive 'stop1-empty'
+        & $script:ScriptPath -UserPrincipalName 'tester@contoso.example' -OutputRoot $script:S1ERoot -ReuseExistingSession *> $null
+        $script:S1ESnap = Read-Snapshot (Get-RunDir $script:S1ERoot)
+        $script:S1EAreasByName = @{}
+        foreach ($a in @($script:S1ESnap.areas)) { $script:S1EAreasByName[$a.area] = $a }
+    }
+    It 'records Empty with count 0: <Area>' -ForEach $script:Stop1Specs {
+        $a = $script:S1EAreasByName[$Area]
+        $a.status | Should -Be 'Empty'
+        $a.count  | Should -Be 0
     }
 }
 

@@ -75,6 +75,21 @@ $script:AreaCsvViews = @{
     'RetentionRecords.FilePlanReferenceIds'    = @('Name', 'Guid')
     'Audit.UnifiedAuditIngestion'              = @('UnifiedAuditLogIngestionEnabled', 'AdminAuditLogEnabled')
     'Audit.LogRetentionPolicies'               = @('Name', 'Priority', 'RecordTypes', 'Operations', 'UserIds', 'RetentionDuration')
+    'ExchangeCompliance.MrmPolicies'           = @('Name', 'Guid', 'RetentionPolicyTagLinks', 'IsDefault')
+    'ExchangeCompliance.MrmTags'               = @('Name', 'Guid', 'Type', 'AgeLimitForRetention', 'RetentionAction', 'RetentionEnabled', 'MessageClass')
+    'ExchangeCompliance.JournalRules'          = @('Name', 'Guid', 'Enabled', 'Scope', 'Recipient', 'JournalEmailAddress')
+    'Alerts.ProtectionAlerts'                  = @('Name', 'Guid', 'Disabled', 'Category', 'Severity', 'ThreatType', 'Operation', 'NotifyUser', 'AggregationType')
+    'Alerts.ActivityAlerts'                    = @('Name', 'Guid', 'Disabled', 'Type', 'Category', 'Operation', 'NotifyUser')
+    'InformationBarriers.Policies'             = @('Name', 'Guid', 'State', 'AssignedSegment', 'SegmentsAllowed', 'SegmentsBlocked')
+    'InformationBarriers.Segments'             = @('Name', 'Guid', 'UserGroupFilter')
+    'Classification.KeywordDictionaries'       = @('Name', 'Identity', 'Description')
+    'Governance.RoleGroups'                    = @('Name', 'Guid', 'DisplayName', 'Description', 'Roles')
+    'Governance.RoleGroupMembers'              = @('RoleGroup', 'MemberName', 'DisplayName', 'MemberGuid', 'RecipientType')
+    'Legacy.HoldPolicies'                      = @('Name', 'Guid', 'Enabled', 'Mode', 'Workload')
+    'Legacy.HoldRules'                         = @('Name', 'Guid', 'Policy', 'Disabled', 'HoldContent', 'HoldDurationDisplayHint')
+    'Legacy.ExchangeDlpPolicies'               = @('Name', 'Guid', 'State', 'Mode', 'Description')
+    'RetentionRecords.AppRetentionPolicies'    = @('Name', 'Guid', 'Enabled', 'Mode', 'Applications')
+    'RetentionRecords.AppRetentionRules'       = @('Name', 'Guid', 'Policy', 'RetentionDuration', 'RetentionComplianceAction', 'ExpirationDateOption')
 }
 
 # Registers an envelope and prints its one-line outcome.
@@ -157,6 +172,8 @@ Trace-Area (Get-SnapshotArea -Area 'Classification.EdmSchemas' -Cmdlet 'Get-DlpE
         }
         @{ Objects = $objects.ToArray(); Sidecars = $sidecars.ToArray(); Notes = $notes.ToArray() }
     })
+Trace-Area (Get-SnapshotArea -Area 'Classification.KeywordDictionaries' -Cmdlet 'Get-DlpKeywordDictionary' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-DlpKeywordDictionary })
 # NOTE: custom trainable classifiers have no export cmdlet (documented gap; see README).
 
 # === Data Loss Prevention ====================================================
@@ -170,6 +187,10 @@ Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Labels' -Cmdlet 'Get-Compli
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Policies' -Cmdlet 'Get-RetentionCompliancePolicy' -Collect { Get-RetentionCompliancePolicy -DistributionDetail })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.Rules' -Cmdlet 'Get-RetentionComplianceRule' `
     -StableKeyProperty @('Guid', 'Policy', 'Name') -Collect { Get-RetentionComplianceRule })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.AppRetentionPolicies' -Cmdlet 'Get-AppRetentionCompliancePolicy' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-AppRetentionCompliancePolicy })
+Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.AppRetentionRules' -Cmdlet 'Get-AppRetentionComplianceRule' `
+    -StableKeyProperty @('Guid', 'Policy', 'Name') -Collect { Get-AppRetentionComplianceRule })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.EventTypes' -Cmdlet 'Get-ComplianceRetentionEventType' -Collect { Get-ComplianceRetentionEventType })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.AdaptiveScopes' -Cmdlet 'Get-AdaptiveScope' -Collect { Get-AdaptiveScope })
 Trace-Area (Get-SnapshotArea -Area 'RetentionRecords.FilePlanAuthorities' -Cmdlet 'Get-FilePlanPropertyAuthority' -Collect { Get-FilePlanPropertyAuthority })
@@ -186,6 +207,59 @@ Trace-Area (Get-SnapshotArea -Area 'Audit.LogRetentionPolicies' -Cmdlet 'Get-Uni
 # diff guarantees (large, and many operational fields move without configuration
 # intent) - see the volatile-field register.
 Trace-Area (Get-SnapshotArea -Area 'Audit.OrganizationConfig' -Cmdlet 'Get-OrganizationConfig' -DiffExcluded -Collect { Get-OrganizationConfig })
+
+# === Exchange compliance (MRM & journaling; batch 3) ========================
+Trace-Area (Get-SnapshotArea -Area 'ExchangeCompliance.MrmPolicies' -Cmdlet 'Get-RetentionPolicy' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-RetentionPolicy })
+Trace-Area (Get-SnapshotArea -Area 'ExchangeCompliance.MrmTags' -Cmdlet 'Get-RetentionPolicyTag' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-RetentionPolicyTag })
+Trace-Area (Get-SnapshotArea -Area 'ExchangeCompliance.JournalRules' -Cmdlet 'Get-JournalRule' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-JournalRule })
+
+# === Alert policies ==========================================================
+Trace-Area (Get-SnapshotArea -Area 'Alerts.ProtectionAlerts' -Cmdlet 'Get-ProtectionAlert' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-ProtectionAlert })
+# Legacy activity alerts: absent on most modern tenants - CmdletNotAvailable is
+# the expected durable record there.
+Trace-Area (Get-SnapshotArea -Area 'Alerts.ActivityAlerts' -Cmdlet 'Get-ActivityAlert' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-ActivityAlert })
+
+# === Information barriers ====================================================
+Trace-Area (Get-SnapshotArea -Area 'InformationBarriers.Policies' -Cmdlet 'Get-InformationBarrierPolicy' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-InformationBarrierPolicy })
+Trace-Area (Get-SnapshotArea -Area 'InformationBarriers.Segments' -Cmdlet 'Get-OrganizationSegment' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-OrganizationSegment })
+
+# === Governance (Purview role groups) ========================================
+Trace-Area (Get-SnapshotArea -Area 'Governance.RoleGroups' -Cmdlet 'Get-RoleGroup' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-RoleGroup })
+# Membership rows are toolkit-shaped descriptors (group context + member
+# identity) because the same member can appear in many groups; the underlying
+# member property names are in the unverified-projections list.
+Trace-Area (Get-SnapshotArea -Area 'Governance.RoleGroupMembers' -Cmdlet @('Get-RoleGroup', 'Get-RoleGroupMember') `
+    -StableKeyProperty @('RoleGroup', 'MemberName') -Collect {
+        foreach ($rg in @(Get-RoleGroup)) {
+            foreach ($m in @(Get-RoleGroupMember -Identity "$($rg.Identity)")) {
+                if ($null -eq $m) { continue }
+                [pscustomobject][ordered]@{
+                    RoleGroup     = "$($rg.Name)"
+                    MemberName    = if ($m.PSObject.Properties['Name'] -and "$($m.Name)" -ne '') { "$($m.Name)" } else { "$m" }
+                    DisplayName   = if ($m.PSObject.Properties['DisplayName']) { "$($m.DisplayName)" } else { $null }
+                    MemberGuid    = if ($m.PSObject.Properties['Guid']) { "$($m.Guid)" } else { $null }
+                    RecipientType = if ($m.PSObject.Properties['RecipientType']) { "$($m.RecipientType)" } else { $null }
+                }
+            }
+        }
+    })
+
+# === Legacy compliance artifacts =============================================
+Trace-Area (Get-SnapshotArea -Area 'Legacy.HoldPolicies' -Cmdlet 'Get-HoldCompliancePolicy' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-HoldCompliancePolicy })
+Trace-Area (Get-SnapshotArea -Area 'Legacy.HoldRules' -Cmdlet 'Get-HoldComplianceRule' `
+    -StableKeyProperty @('Guid', 'Policy', 'Name') -Collect { Get-HoldComplianceRule })
+# Legacy EXO DLP (distinct from Get-DlpCompliancePolicy).
+Trace-Area (Get-SnapshotArea -Area 'Legacy.ExchangeDlpPolicies' -Cmdlet 'Get-DlpPolicy' `
+    -StableKeyProperty @('Guid', 'Name') -Collect { Get-DlpPolicy })
 
 # === Diagnostics (opt-in, out-of-band corroborating evidence; D5/D6) =========
 Trace-Area (Get-SnapshotArea -Area 'Diagnostics.PurviewConfigZip' -Cmdlet 'Export-PurviewConfig' -DiffExcluded `

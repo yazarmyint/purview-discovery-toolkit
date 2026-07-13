@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — discovery-refocus batch 3, Stop 1 (coverage expansion: always-readable areas)
+
+### Added
+- **15 new snapshot areas** (D12 coverage v1), each a plain `Get-SnapshotArea` collector
+  in the existing framework — same envelope, D9 statuses, composite stable keys,
+  derived views, dictionary-safe serialization:
+  `ExchangeCompliance.{MrmPolicies, MrmTags, JournalRules}`,
+  `Alerts.{ProtectionAlerts, ActivityAlerts}` (activity alerts are legacy —
+  `CmdletNotAvailable` is the expected durable record on modern tenants),
+  `InformationBarriers.{Policies, Segments}`, `Classification.KeywordDictionaries`,
+  `Governance.{RoleGroups, RoleGroupMembers}` (membership rows are toolkit-shaped
+  descriptors keyed `RoleGroup|MemberName`, since one member can sit in many groups),
+  `Legacy.{HoldPolicies, HoldRules, ExchangeDlpPolicies}`, and
+  `RetentionRecords.{AppRetentionPolicies, AppRetentionRules}`.
+- 76 new offline tests: per area, mocked Success (count + composite stable-key order +
+  frozen view columns), authorization failure → `AccessDenied`, absent cmdlet →
+  `CmdletNotAvailable`, and empty tenant → `Empty` (valid negative evidence).
+- View registry and `docs/SNAPSHOT-SCHEMA.md` updated: new area registry section,
+  stable-key table rows, and one unverified-projections row per new cmdlet.
+
 ## Unreleased — discovery-refocus batch 2, post-checkpoint (schema freeze + renames)
 
 The sandbox checkpoint ran Script A read-only against a live tenant. The property-shape

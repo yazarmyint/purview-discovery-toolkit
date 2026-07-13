@@ -132,7 +132,14 @@ collision-free even without the Guid.
 | `Dlp.Rules` | `Guid`, `ParentPolicyName`, `Name` |
 | `InformationProtection.AutoLabelRules` | `Guid`, `ParentPolicyName`, `Name` |
 | `RetentionRecords.Rules` | `Guid`, `Policy`, `Name` |
-| every other area | *(empty — generic rule)* |
+| `RetentionRecords.AppRetentionRules`, `Legacy.HoldRules` | `Guid`, `Policy`, `Name` |
+| `Governance.RoleGroupMembers` | `RoleGroup`, `MemberName` (toolkit-shaped descriptor rows) |
+| every other batch-3 area | `Guid`, `Name` |
+| every batch-2 area not listed | *(empty — generic rule)* |
+
+Batch-3 areas declare `Guid, Name` explicitly (rather than relying on the generic
+rule) so the envelope self-describes even if a live object exposes an unexpected
+identifier set; the composite degrades to `name:<x>` when no Guid exists.
 
 A diff tool keys objects by the envelope's own `stableKeyProperties` declaration,
 so both snapshots of a pair self-describe the same rule.
@@ -166,6 +173,21 @@ keys and derived-view columns*, never the stored evidence.
 | `Get-AdminAuditLogConfig` | `AdminAuditLogEnabled` | view column |
 | `Get-UnifiedAuditLogRetentionPolicy` | `Name` (stable key; may be `Policy`), `Priority`, `RecordTypes`, `Operations`, `UserIds`, `RetentionDuration` | generic stable key, view columns |
 | `Get-ConnectionInformation` | `UserPrincipalName`, `TenantID`, `Organization`, `ConnectionUri`, `State`, `IsEopSession` | provenance (defensive — absent names are skipped) |
+| `Get-RetentionPolicy` (batch 3) | `Guid`, `RetentionPolicyTagLinks`, `IsDefault` | stable key, view columns |
+| `Get-RetentionPolicyTag` (batch 3) | `Guid`, `Type`, `AgeLimitForRetention`, `RetentionAction`, `RetentionEnabled`, `MessageClass` | stable key, view columns |
+| `Get-JournalRule` (batch 3) | `Guid`, `Enabled`, `Scope`, `Recipient`, `JournalEmailAddress` | stable key, view columns |
+| `Get-ProtectionAlert` (batch 3) | `Guid`, `Disabled`, `Category`, `Severity`, `ThreatType`, `Operation`, `NotifyUser`, `AggregationType` | stable key, view columns |
+| `Get-ActivityAlert` (batch 3, legacy) | `Guid`, `Disabled`, `Type`, `Category`, `Operation`, `NotifyUser` | stable key, view columns (`CmdletNotAvailable` expected on modern tenants) |
+| `Get-InformationBarrierPolicy` (batch 3) | `Guid`, `State`, `AssignedSegment`, `SegmentsAllowed`, `SegmentsBlocked` | stable key, view columns |
+| `Get-OrganizationSegment` (batch 3) | `Guid`, `UserGroupFilter` | stable key, view columns |
+| `Get-DlpKeywordDictionary` (batch 3) | `Guid`, `Identity`, `Description` | stable key, view columns |
+| `Get-RoleGroup` (batch 3) | `Guid`, `DisplayName`, `Description`, `Roles`, `Identity` | stable key, view columns, member enumeration |
+| `Get-RoleGroupMember` (batch 3) | member `Name`, `DisplayName`, `Guid`, `RecipientType` | values inside the toolkit-shaped membership descriptors (descriptor column names themselves are toolkit-defined) |
+| `Get-HoldCompliancePolicy` (batch 3, legacy) | `Guid`, `Enabled`, `Mode`, `Workload` | stable key, view columns |
+| `Get-HoldComplianceRule` (batch 3, legacy) | `Guid`, `Policy`, `Disabled`, `HoldContent`, `HoldDurationDisplayHint` | stable key, view columns |
+| `Get-DlpPolicy` (batch 3, legacy EXO DLP) | `Guid`, `State`, `Mode`, `Description` | stable key, view columns |
+| `Get-AppRetentionCompliancePolicy` (batch 3) | `Guid`, `Enabled`, `Mode`, `Applications` | stable key, view columns |
+| `Get-AppRetentionComplianceRule` (batch 3) | `Guid`, `Policy`, `RetentionDuration`, `RetentionComplianceAction`, `ExpirationDateOption` | stable key, view columns |
 
 **Verified by the sandbox run** (no longer suspect): the `Export-PurviewConfig`
 component tokens `DLP, MIPLabels, ClassificationAndTextExtraction, DLM` (prior-audit
@@ -209,8 +231,9 @@ durable signal.
   `[datetime]` on read; 5.1 keeps strings. Read the raw text when byte-level
   comparison matters.
 
-## Area registry (batch 2)
+## Area registry
 
+Batch 2:
 `InformationProtection.{SensitivityLabels, LabelPolicies, AutoLabelPolicies, AutoLabelRules}`,
 `Classification.{SensitiveInformationTypes, SitRulePackages, EdmSchemas}`,
 `Dlp.{Policies, Rules, EndpointGlobalSettings}`,
@@ -218,5 +241,15 @@ durable signal.
 `Audit.{UnifiedAuditIngestion, LogRetentionPolicies, OrganizationConfig}`,
 `Diagnostics.PurviewConfigZip`.
 
+Batch 3 (D12 coverage expansion, Stop 1 — always-readable):
+`Classification.KeywordDictionaries`,
+`RetentionRecords.{AppRetentionPolicies, AppRetentionRules}`,
+`ExchangeCompliance.{MrmPolicies, MrmTags, JournalRules}`,
+`Alerts.{ProtectionAlerts, ActivityAlerts}`,
+`InformationBarriers.{Policies, Segments}`,
+`Governance.{RoleGroups, RoleGroupMembers}`,
+`Legacy.{HoldPolicies, HoldRules, ExchangeDlpPolicies}`.
+
 Trainable classifiers, data connectors and Compliance Manager have no read cmdlet in
-SCC/EXO PowerShell and are documented gaps (D12), not areas.
+SCC/EXO PowerShell and are documented gaps (D12), not areas. Transport rules are out
+for v1 (D12).
