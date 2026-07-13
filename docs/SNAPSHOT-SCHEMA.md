@@ -16,12 +16,22 @@ SourceDiscovery-<UTC yyyyMMdd-HHmmss>/
   snapshot.json          <- the canonical snapshot (single source of truth)
   _manifest.csv          <- derived status view (one row per area)
   _transcript.log        <- console transcript of the run
+  views/<Area>.csv       <- derived per-area views (projected from the snapshot)
   sidecars/<Area>/...    <- large artifacts (XML, ZIP), referenced from the snapshot
 ```
 
 `snapshot.json` is UTF-8 **without** BOM. CSV views are written by `Export-Csv`
 (UTF-8; under Windows PowerShell 5.1 they carry a BOM — views are convenience
 artifacts, not diff inputs).
+
+**Derived views.** `views/<Area>.csv` files are projected from the collected
+envelopes after the snapshot is written — never from a second tenant call. Each
+area's column set is frozen in the collector's view registry; a registered column
+absent on the live objects emits **blank** (the caught-later signal for an
+[unverified projection](#unverified-projections)), never an error. Views exist
+only for areas that collected objects; `Empty` and failed areas are represented by
+the snapshot and manifest. `Dlp.EndpointGlobalSettings` (single config object of
+unverified shape) and the diff-excluded areas have no view.
 
 ## Document layout
 

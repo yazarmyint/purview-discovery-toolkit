@@ -382,6 +382,49 @@ Describe 'Get-SnapshotProvenance' {
     }
 }
 
+Describe 'Write-SnapshotAreaCsvViews (derived views, Task 5d)' {
+    # Per-area CSVs are DERIVED from snapshot envelopes - the writer only ever sees
+    # collected envelopes, never a tenant. Columns frozen against documentation may
+    # be absent on live objects: they emit blank (a caught-later signal), never an
+    # error.
+    It 'projects the registered columns in order, blank where the property is absent' {
+        $env = Get-SnapshotArea -Area 'T.Labels' -Collect {
+            @([pscustomobject]@{ Name = 'b'; Guid = 'g2'; DisplayName = 'B' },
+              [pscustomobject]@{ Name = 'a'; Guid = 'g1'; DisplayName = 'A' })
+        }
+        $dir = Join-Path $TestDrive 'views1'
+        $written = Write-SnapshotAreaCsvViews -Areas @($env) -Directory $dir `
+            -Columns @{ 'T.Labels' = @('Name', 'Guid', 'ParentLabelDisplayName', 'Disabled') }
+        @($written).Count | Should -Be 1
+        $rows = @(Import-Csv (Join-Path $dir 'T.Labels.csv'))
+        $rows.Count | Should -Be 2
+        @($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) | Should -Be @('Name', 'Guid', 'ParentLabelDisplayName', 'Disabled')
+        $rows[0].Name | Should -Be 'a'
+        $rows[0].ParentLabelDisplayName | Should -Be ''
+        $rows[0].Disabled | Should -Be ''
+    }
+    It 'flattens array-valued properties into a delimited cell' {
+        $env = Get-SnapshotArea -Area 'T.Pol' -Collect {
+            ,([pscustomobject]@{ Name = 'p'; Labels = @('Alpha', 'Beta') })
+        }
+        $dir = Join-Path $TestDrive 'views2'
+        Write-SnapshotAreaCsvViews -Areas @($env) -Directory $dir -Columns @{ 'T.Pol' = @('Name', 'Labels') } | Out-Null
+        (Import-Csv (Join-Path $dir 'T.Pol.csv'))[0].Labels | Should -Be 'Alpha; Beta'
+    }
+    It 'writes views only for areas with collected objects and a registered column set' {
+        $areas = @(
+            (Get-SnapshotArea -Area 'T.Empty' -Collect { @() }),
+            (Get-SnapshotArea -Area 'T.Failed' -Collect { throw 'kaboom' }),
+            (Get-SnapshotArea -Area 'T.NoView' -Collect { ,([pscustomobject]@{ Name = 'x' }) })
+        )
+        $dir = Join-Path $TestDrive 'views3'
+        $written = Write-SnapshotAreaCsvViews -Areas $areas -Directory $dir `
+            -Columns @{ 'T.Empty' = @('Name'); 'T.Failed' = @('Name') }
+        @($written).Count | Should -Be 0
+        Test-Path $dir | Should -BeFalse
+    }
+}
+
 Describe 'Write-SnapshotManifestCsv (status view)' {
     It 'writes one row per area with the envelope status columns' {
         $areas = @(

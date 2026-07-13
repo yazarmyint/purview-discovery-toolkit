@@ -45,6 +45,36 @@ function Write-SidecarFile([string]$AreaName, [string]$FileName, [string]$Conten
     "sidecars/$AreaName/$FileName"
 }
 
+# Derived per-area CSV view columns (D9, Task 5d), frozen against documented
+# property names at the sandbox checkpoint. A column absent on live objects emits
+# blank - see "Unverified projections" in docs/SNAPSHOT-SCHEMA.md. Areas without a
+# registered view (Dlp.EndpointGlobalSettings, the diff-excluded areas) are
+# represented by snapshot.json alone.
+$script:AreaCsvViews = @{
+    'InformationProtection.SensitivityLabels'  = @('Name', 'Guid', 'DisplayName', 'ParentLabelDisplayName', 'Priority', 'ContentType', 'Disabled')
+    'InformationProtection.LabelPolicies'      = @('Name', 'Guid', 'Mode', 'Enabled', 'Workload', 'Labels')
+    'InformationProtection.AutoLabelPolicies'  = @('Name', 'Guid', 'Mode', 'ApplySensitivityLabel', 'Workload')
+    'InformationProtection.AutoLabelRules'     = @('Name', 'Guid', 'ParentPolicyName', 'Disabled', 'Workload')
+    'Classification.SensitiveInformationTypes' = @('Name', 'Id', 'Publisher', 'Type', 'RulePackId')
+    'Classification.SitRulePackages'           = @('Name', 'RulePackId', 'Publisher', 'Version', 'SidecarPath')
+    'Classification.EdmSchemas'                = @('Name', 'SidecarPath')
+    'Dlp.Policies'                             = @('Name', 'Guid', 'Mode', 'Enabled', 'ExchangeLocation', 'SharePointLocation', 'OneDriveLocation', 'TeamsLocation', 'EndpointDlpLocation')
+    'Dlp.Rules'                                = @('Name', 'Guid', 'ParentPolicyName', 'Disabled', 'BlockAccess', 'BlockAccessScope', 'GenerateAlert', 'GenerateIncidentReport', 'NotifyUser', 'NotifyAllowOverride', 'ReportSeverityLevel')
+    'RetentionRecords.Labels'                  = @('Name', 'Guid', 'RetentionAction', 'RetentionDuration', 'RetentionType', 'IsRecordLabel', 'Notes')
+    'RetentionRecords.Policies'                = @('Name', 'Guid', 'Enabled', 'Mode', 'Workload', 'RestrictiveRetention')
+    'RetentionRecords.Rules'                   = @('Name', 'Guid', 'Policy', 'RetentionDuration', 'RetentionComplianceAction', 'ExpirationDateOption')
+    'RetentionRecords.EventTypes'              = @('Name', 'Guid')
+    'RetentionRecords.AdaptiveScopes'          = @('Name', 'Guid', 'LocationType', 'Mode', 'FilterQuery')
+    'RetentionRecords.FilePlanAuthorities'     = @('Name', 'Guid')
+    'RetentionRecords.FilePlanCategories'      = @('Name', 'Guid')
+    'RetentionRecords.FilePlanSubCategories'   = @('Name', 'Guid')
+    'RetentionRecords.FilePlanCitations'       = @('Name', 'Guid')
+    'RetentionRecords.FilePlanDepartments'     = @('Name', 'Guid')
+    'RetentionRecords.FilePlanReferenceIds'    = @('Name', 'Guid')
+    'Audit.UnifiedAuditIngestion'              = @('UnifiedAuditLogIngestionEnabled', 'AdminAuditLogEnabled')
+    'Audit.LogRetentionPolicies'               = @('Name', 'Priority', 'RecordTypes', 'Operations', 'UserIds', 'RetentionDuration')
+}
+
 # Registers an envelope and prints its one-line outcome.
 function Trace-Area($Envelope) {
     $script:Areas.Add($Envelope)
@@ -194,6 +224,14 @@ Write-Host "Snapshot run complete." -ForegroundColor Cyan
         Write-PurviewSnapshot -Document $doc -Path (Join-Path $runDir 'snapshot.json')
         Write-Host "Snapshot: $(Join-Path $runDir 'snapshot.json') ($outcome)" -ForegroundColor Cyan
     } catch { Write-Warning "Snapshot write failed: $($_.Exception.Message)" }
+    try {
+        # Derived views: projected from the collected envelopes, never a second
+        # tenant call (D9).
+        $views = Write-SnapshotAreaCsvViews -Areas @($script:Areas) -Directory (Join-Path $runDir 'views') -Columns $script:AreaCsvViews
+        if (@($views).Count -gt 0) {
+            Write-Host "Views: $(@($views).Count) per-area CSVs under views/ (derived from the snapshot)" -ForegroundColor Cyan
+        }
+    } catch { Write-Warning "View write failed: $($_.Exception.Message)" }
     if ($script:Areas.Count -gt 0) {
         try { Write-SnapshotManifestCsv -Areas @($script:Areas) -Path (Join-Path $runDir '_manifest.csv') }
         catch { Write-Warning "Manifest view write failed: $($_.Exception.Message)" }

@@ -368,6 +368,45 @@ function Write-PurviewSnapshot {
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding $false))
 }
 
+function Write-SnapshotAreaCsvViews {
+    <# Derived per-area CSV views (D9, Task 5d): projected FROM collected snapshot
+       envelopes, never from a second tenant call - the writer only ever sees
+       envelopes. A registered column absent on the live objects emits blank (a
+       caught-later signal for the unverified projections), never an error.
+       Array values flatten to '; '-joined cells. Views are written only for areas
+       that collected objects; snapshot.json remains the source of truth. Returns
+       the written paths. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Areas,
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Columns
+    )
+    $written = [System.Collections.Generic.List[object]]::new()
+    foreach ($a in @($Areas)) {
+        if (-not $Columns.Contains($a.area)) { continue }
+        $objs = @($a.objects)
+        if (@($objs).Count -eq 0) { continue }
+        $cols = @($Columns[$a.area])
+        $rows = @(foreach ($o in $objs) {
+            $row = [ordered]@{}
+            foreach ($c in $cols) {
+                $v = if ($o.PSObject.Properties[$c]) { $o.$c } else { $null }
+                $row[$c] = if ($null -eq $v) { '' }
+                           elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
+                               (@($v) | ForEach-Object { "$_" }) -join '; '
+                           } else { "$v" }
+            }
+            [pscustomobject]$row
+        })
+        if (-not (Test-Path $Directory)) { New-Item -ItemType Directory -Force -Path $Directory | Out-Null }
+        $p = Join-Path $Directory ($a.area + '.csv')
+        $rows | Export-Csv -Path $p -NoTypeInformation -Encoding utf8
+        $written.Add($p)
+    }
+    ,@($written.ToArray())
+}
+
 function Write-SnapshotManifestCsv {
     <# Human-scannable status view of the envelopes (one row per area). A derived
        view: snapshot.json remains the source of truth. #>

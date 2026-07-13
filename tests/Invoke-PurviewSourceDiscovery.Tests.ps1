@@ -107,9 +107,27 @@ Describe 'Snapshot run - the full D9 status vocabulary end to end (integration)'
         $rows.Count | Should -Be @($script:Snap.areas).Count
         @($rows | Where-Object { $_.Status -eq 'NotAttempted' }).Count | Should -BeGreaterOrEqual 1
     }
-    It 'emits no per-area JSON/CSV/CLIXML artifacts - the snapshot is the source of truth' {
-        @(Get-ChildItem -Path $script:RunDir -File -Recurse |
-            Where-Object { $_.Name -notin @('snapshot.json', '_manifest.csv', '_transcript.log') }).Count | Should -Be 0
+    It 'derives per-area CSV views from the snapshot with the frozen columns; unverified columns emit blank' {
+        $vp = Join-Path (Join-Path $script:RunDir 'views') 'InformationProtection.SensitivityLabels.csv'
+        Test-Path $vp | Should -BeTrue
+        $rows = @(Import-Csv $vp)
+        $rows.Count | Should -Be 2
+        @($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) |
+            Should -Be @('Name', 'Guid', 'DisplayName', 'ParentLabelDisplayName', 'Priority', 'ContentType', 'Disabled')
+        $rows[0].Name | Should -Be 'alpha'
+        $rows[0].DisplayName | Should -Be 'Alpha'
+        $rows[0].ParentLabelDisplayName | Should -Be ''
+    }
+    It 'writes no view for areas without objects' {
+        $views = Join-Path $script:RunDir 'views'
+        Test-Path (Join-Path $views 'InformationProtection.LabelPolicies.csv')     | Should -BeFalse
+        Test-Path (Join-Path $views 'InformationProtection.AutoLabelPolicies.csv') | Should -BeFalse
+    }
+    It 'emits nothing outside the snapshot, its derived views and the run logs' {
+        @(Get-ChildItem -Path $script:RunDir -File -Recurse | Where-Object {
+            $_.Name -notin @('snapshot.json', '_manifest.csv', '_transcript.log') -and
+            $_.DirectoryName -notmatch '\\(views|sidecars)(\\|$)'
+        }).Count | Should -Be 0
     }
 }
 
