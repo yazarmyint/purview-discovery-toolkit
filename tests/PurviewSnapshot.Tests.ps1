@@ -338,6 +338,16 @@ Describe 'Get-PurviewSnapshotDocument + canonical serialization (D9 diff-readine
     }
 }
 
+Describe 'Volatile-field register (Task 5e)' {
+    It 'ignores run noise but never count - a count delta is a real configuration change' {
+        $reg = Get-SnapshotVolatileFieldRegister
+        $reg | Should -Contain 'provenance'
+        $reg | Should -Contain 'areas[].durationMs'
+        $reg | Should -Contain 'areas[].error'
+        $reg | Should -Not -Contain 'areas[].count'
+    }
+}
+
 Describe 'Get-SnapshotProvenance' {
     It 'carries UPN, versions, engine, sorted typed parameters, ISO-8601 UTC timestamps, outcome' {
         $t0 = New-Object datetime 2026, 7, 10, 12, 0, 0, ([System.DateTimeKind]::Utc)

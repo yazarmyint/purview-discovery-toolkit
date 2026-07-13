@@ -181,12 +181,22 @@ Fields a diff of two snapshots must ignore (also embedded in every snapshot unde
 |---|---|
 | `provenance` | Run-specific by definition (timestamps, engine, versions). Diff tools should still *compare* `connections` tenant identity and warn on mismatch |
 | `areas[].durationMs` | Timing noise |
-| `areas[].count` | Derived from `objects`; diff the objects |
 | `areas[].error` | Message text varies run to run (status is the durable signal) |
 | `areas[].objects[].DistributionStatus` | Policy distribution state changes without configuration change |
 | `areas[].objects[].DistributionResults` | Same |
 | `areas[].objects[].LastStatusUpdateTime` | Same |
 | `areas[diffExcluded=true]` | `Audit.OrganizationConfig` (large, operationally noisy) and `Diagnostics.PurviewConfigZip` (opt-in, out-of-band per D6) |
+
+**Why `areas[].count` is NOT in the register (Task 5e).** The register's admission
+test is: *does the field change run-to-run without any configuration change?*
+`count` fails that test — it moves only when `objects` moves, i.e. exactly when
+configuration changed, and a policy count going 14 → 11 between engagement start
+and end is precisely what a diff should surface. `count` was originally listed as
+"derived; diff the objects", but *derived* is not *volatile*: a derived field that
+moves only with real change is safe to compare (and makes a useful summary
+headline above the per-object detail). `durationMs` and `error` stay ignored
+because they vary with timing and message wording while `status` carries the
+durable signal.
 
 ## Engine notes
 

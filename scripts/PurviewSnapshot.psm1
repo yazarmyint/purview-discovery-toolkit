@@ -30,7 +30,6 @@ $script:TransportNoiseProperties = @('PSComputerName', 'RunspaceId', 'PSShowComp
 $script:VolatileFieldRegister = @(
     'provenance',
     'areas[].durationMs',
-    'areas[].count',
     'areas[].error',
     'areas[].objects[].DistributionStatus',
     'areas[].objects[].DistributionResults',
