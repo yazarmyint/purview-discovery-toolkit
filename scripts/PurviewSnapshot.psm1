@@ -1,0 +1,428 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Shared plumbing for the Purview configuration snapshot toolkit (internal module).
+    Houses the connect logic, the per-area collection wrapper and its status
+    vocabulary, stable-key ordering, and the canonical snapshot serializers.
+.NOTES
+    Internal structure only (DECISIONS.md batch 2, Task 1): no manifest, no publish.
+    Read-only: the only tenant-touching commands issued here are the Connect-* session
+    setup calls. Collection happens in caller-supplied scriptblocks, so cmdlet
+    resolution (and test mocking) follows the calling script's session, not this
+    module's scope.
+
+    Status vocabulary (D9):
+        Success | Empty | AccessDenied | CmdletNotAvailable | Failed | NotAttempted
+#>
+
+$script:SnapshotSchemaVersion = '1.0'   # frozen at the sandbox checkpoint (2026-07-13); see docs/SNAPSHOT-SCHEMA.md
+$script:SnapshotToolName      = 'purview-discovery-toolkit'
+$script:SnapshotToolVersion   = '2.0.0-dev'
+
+# PowerShell remoting/transport artifacts stripped from collected objects before
+# serialization: they describe the session, not tenant configuration.
+$script:TransportNoiseProperties = @('PSComputerName', 'RunspaceId', 'PSShowComputerName')
+
+# Volatile-field register (D9): paths a diff of two snapshots must ignore because they
+# change run-to-run without any configuration change. Reasons are documented in
+# docs/SNAPSHOT-SCHEMA.md; the register is embedded in every snapshot for
+# self-description.
+$script:VolatileFieldRegister = @(
+    'provenance',
+    'areas[].durationMs',
+    'areas[].error',
+    'areas[].objects[].DistributionStatus',
+    'areas[].objects[].DistributionResults',
+    'areas[].objects[].LastStatusUpdateTime',
+    'areas[diffExcluded=true]'
+)
+
+function Get-SnapshotSchemaVersion { $script:SnapshotSchemaVersion }
+function Get-SnapshotToolVersion   { $script:SnapshotToolVersion }
+function Get-SnapshotVolatileFieldRegister { ,@($script:VolatileFieldRegister) }
+
+function Get-SafeName([string]$n) {
+    if ([string]::IsNullOrWhiteSpace($n)) { 'unnamed' } else { ($n -replace '[\\/:*?"<>|]', '_').Trim() }
+}
+
+function Connect-PurviewSnapshotSession {
+    <# Connects to Security & Compliance PowerShell (IPPS) and Exchange Online.
+       -ReuseExistingSession skips everything, including the module import, so an
+       already-connected session (or an offline test session) is left untouched. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [switch]$ReuseExistingSession
+    )
+    if ($ReuseExistingSession) { return }
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
+    Write-Host "Connecting to Security & Compliance PowerShell (sign in as $UserPrincipalName)..." -ForegroundColor Yellow
+    Connect-IPPSSession -UserPrincipalName $UserPrincipalName
+    Write-Host "Connecting to Exchange Online (sign in as $UserPrincipalName)..." -ForegroundColor Yellow
+    Connect-ExchangeOnline -UserPrincipalName $UserPrincipalName -ShowBanner:$false
+}
+
+function Resolve-SnapshotFailureStatus {
+    <# Maps an exception to the D9 failure statuses: CommandNotFound ->
+       CmdletNotAvailable; authorization signals (type or message text, anywhere in
+       the inner-exception chain) -> AccessDenied; anything else -> Failed. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Exception)
+    if ($Exception -is [System.Management.Automation.CommandNotFoundException]) { return 'CmdletNotAvailable' }
+    $e = $Exception
+    while ($null -ne $e) {
+        if ($e -is [System.UnauthorizedAccessException] -or $e -is [System.Security.SecurityException]) { return 'AccessDenied' }
+        $text = "$($e.GetType().FullName) $($e.Message)"
+        if ($text -match '(?i)access[\s-]*(is[\s-]+)?denied|unauthori[sz]ed|forbidden|\(401\)|\(403\)|insufficient\s+(permission|privilege|access|right)|not\s+authorized|permission\s+denied|role\s+(assignment|required)|\bRBAC\b') {
+            return 'AccessDenied'
+        }
+        $e = $e.InnerException
+    }
+    'Failed'
+}
+
+function Get-SnapshotStableKey {
+    <# Stable identifier used to order objects deterministically (D9). When -Property
+       names a documented per-area composite (Task 5c), the key is built from those
+       properties in order (absent/empty ones skipped); rule areas declare composites
+       so the diff never silently lands on the content hash. Otherwise the generic
+       rule applies: Guid+Name composite where a Guid exists, then Name, then
+       Identity, then a SHA-256 of the object's compact JSON. Documented in
+       docs/SNAPSHOT-SCHEMA.md. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Object,
+        [string[]]$Property = @()
+    )
+    $p = $Object.PSObject.Properties
+    if (@($Property).Count -gt 0) {
+        $parts = @(foreach ($n in @($Property)) {
+            if ($p[$n] -and "$($Object.$n)" -ne '') { $n.ToLowerInvariant() + ':' + "$($Object.$n)" }
+        })
+        if (@($parts).Count -gt 0) { return ($parts -join '|') }
+        # No declared property present on this object: fall through to the generic rule.
+    }
+    $guid     = if ($p['Guid'])     { "$($Object.Guid)" }     else { '' }
+    $name     = if ($p['Name'])     { "$($Object.Name)" }     else { '' }
+    $identity = if ($p['Identity']) { "$($Object.Identity)" } else { '' }
+    if ($guid)     { return "guid:$guid|name:$name" }
+    if ($name)     { return "name:$name" }
+    if ($identity) { return "id:$identity" }
+    $json = ConvertTo-Json -InputObject $Object -Depth 12 -Compress -WarningAction SilentlyContinue
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = (@($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($json))) | ForEach-Object { $_.ToString('x2') }) -join '' }
+    finally { $sha.Dispose() }
+    "hash:$hash"
+}
+
+function ConvertTo-SnapshotSafeValue {
+    <# Makes a value JSON-safe and diff-deterministic (Task 5a). Every dictionary
+       reachable through PSCustomObject properties, arrays and nested dictionaries is
+       rebuilt with STRING keys in ORDINAL order: ConvertTo-Json rejects non-string
+       dictionary keys ("Keys must be strings"), and hashtables enumerate in hash
+       order - randomized per process on pwsh - which would break byte-identical
+       diffs. Key collisions after stringification disambiguate with #2, #3, ... so
+       no value is ever dropped. Scalars, strings, dates, enums and unrecognized
+       .NET objects pass through unchanged. #>
+    [CmdletBinding()]
+    param($Value, [int]$Depth = 12)
+    if ($null -eq $Value -or $Depth -le 0) { return $Value }
+    $t = $Value.GetType()
+    if ($Value -is [string] -or $t.IsPrimitive -or $t.IsEnum -or
+        $Value -is [datetime] -or $Value -is [guid] -or $Value -is [decimal] -or $Value -is [timespan]) { return $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $pairs = [System.Collections.Generic.List[object]]::new()
+        foreach ($k in @($Value.Keys)) { $pairs.Add([pscustomobject]@{ S = "$k"; K = $k }) }
+        $pairs.Sort([System.Comparison[object]] { param($x, $y) [string]::CompareOrdinal($x.S, $y.S) })
+        $safe = [ordered]@{}
+        foreach ($p in $pairs) {
+            $s = $p.S; $i = 2
+            while ($safe.Contains($s)) { $s = "$($p.S)#$i"; $i++ }
+            $safe[$s] = ConvertTo-SnapshotSafeValue -Value $Value[$p.K] -Depth ($Depth - 1)
+        }
+        return $safe
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $copy = [ordered]@{}
+        foreach ($pr in $Value.PSObject.Properties) {
+            $copy[$pr.Name] = ConvertTo-SnapshotSafeValue -Value $pr.Value -Depth ($Depth - 1)
+        }
+        return [pscustomobject]$copy
+    }
+    if ($Value -is [array]) {
+        $et = $t.GetElementType()
+        if ($et -and ($et.IsPrimitive -or $et -eq [string])) { return $Value }
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        return ,@(foreach ($item in $Value) { ConvertTo-SnapshotSafeValue -Value $item -Depth ($Depth - 1) })
+    }
+    $Value
+}
+
+function ConvertTo-SnapshotObjects {
+    <# Normalizes a collected object set for the snapshot: drops nulls, strips
+       remoting noise properties, rewrites dictionary values JSON-safe (Task 5a), and
+       sorts by stable key (ordinal, with the object's compact JSON as tiebreaker so
+       duplicate keys still order deterministically). -StableKeyProperty forwards a
+       per-area composite key declaration (Task 5c). #>
+    [CmdletBinding()]
+    param(
+        [object[]]$Objects = @(),
+        [string[]]$StableKeyProperty = @()
+    )
+    $clean = [System.Collections.Generic.List[object]]::new()
+    foreach ($o in @($Objects)) {
+        if ($null -eq $o) { continue }
+        $noise = @($o.PSObject.Properties | Where-Object { $_.Name -in $script:TransportNoiseProperties })
+        $stripped = if (@($noise).Count -gt 0) {
+            $copy = [ordered]@{}
+            foreach ($pr in $o.PSObject.Properties) {
+                if ($pr.Name -notin $script:TransportNoiseProperties) { $copy[$pr.Name] = $pr.Value }
+            }
+            [pscustomobject]$copy
+        } else {
+            $o
+        }
+        $clean.Add((ConvertTo-SnapshotSafeValue -Value $stripped))
+    }
+    if ($clean.Count -le 1) { return ,@($clean.ToArray()) }
+    # In-place List sort with an ordinal Comparison delegate. (Array.Sort(keys, items)
+    # is unusable here: PowerShell passes the items array as a converted copy, so the
+    # caller's array never reorders.)
+    $decorated = [System.Collections.Generic.List[object]]::new()
+    foreach ($o in $clean) {
+        $tiebreak = ConvertTo-Json -InputObject $o -Depth 12 -Compress -WarningAction SilentlyContinue
+        $decorated.Add([pscustomobject]@{ K = (Get-SnapshotStableKey -Object $o -Property $StableKeyProperty) + "`n" + $tiebreak; O = $o })
+    }
+    $decorated.Sort([System.Comparison[object]] { param($x, $y) [string]::CompareOrdinal($x.K, $y.K) })
+    $sorted = New-Object 'object[]' $decorated.Count
+    for ($i = 0; $i -lt $decorated.Count; $i++) { $sorted[$i] = $decorated[$i].O }
+    ,$sorted
+}
+
+function Get-SnapshotArea {
+    <# The Export-Artifact successor: runs a caller-supplied collect scriptblock and
+       returns a per-area envelope carrying the durable outcome. Every attempted area
+       yields an envelope; nothing is silent (D9).
+
+       -Process optionally post-processes the collected objects INSIDE the same
+       try/catch (so sidecar-writing failures classify into the area status). It
+       receives the raw objects and returns @{ Objects; Sidecars; Notes }. Notes
+       surface in the envelope's error field without failing the area. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Area,
+        [string[]]$Cmdlet = @(),
+        [scriptblock]$Collect,
+        [scriptblock]$Process,
+        [string[]]$StableKeyProperty = @(),
+        [switch]$DiffExcluded,
+        [switch]$Skip,
+        [string]$SkipReason = 'Skipped by parameter'
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $status = 'Failed'; $err = $null; $objects = @(); $sidecars = @()
+    if ($Skip) {
+        $status = 'NotAttempted'
+        $err = $SkipReason
+    } elseif ($null -eq $Collect) {
+        throw "Get-SnapshotArea '$Area': -Collect is required unless -Skip is set."
+    } else {
+        try {
+            # 2>&1 captures NON-terminating errors: cmdlets living in another module
+            # session state (the EXO v3 proxies) do not see the calling script's
+            # ErrorActionPreference='Stop', so their failures arrive on the error
+            # stream instead of throwing. Task 5b: those must classify like thrown
+            # exceptions - an error is never recorded as Empty.
+            $rawAll = @(& $Collect 2>&1)
+            $errRecords = @($rawAll | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+            $raw = @($rawAll | Where-Object { $null -ne $_ -and $_ -isnot [System.Management.Automation.ErrorRecord] })
+            $notes = @()
+            if ($Process) {
+                $r = & $Process $raw
+                $objects  = @(@($r.Objects)  | Where-Object { $null -ne $_ })
+                $sidecars = @(@($r.Sidecars) | Where-Object { $null -ne $_ })
+                $notes    = @(@($r.Notes)    | Where-Object { $_ })
+            } else {
+                $objects = $raw
+            }
+            $objects = ConvertTo-SnapshotObjects -Objects $objects -StableKeyProperty $StableKeyProperty
+            if (@($errRecords).Count -gt 0) {
+                # Collected objects (if any) are kept: a failure status with a
+                # nonzero count means partial collection, documented in the schema.
+                $status = Resolve-SnapshotFailureStatus -Exception $errRecords[0].Exception
+                $notes = @(@($errRecords | Select-Object -First 3 | ForEach-Object { "$_" }) + @($notes))
+                $err = (@($notes) -join '; ')
+            } else {
+                $status = if (@($objects).Count -gt 0) { 'Success' } else { 'Empty' }
+                if (@($notes).Count -gt 0) { $err = (@($notes) -join '; ') }
+            }
+        } catch {
+            $status = Resolve-SnapshotFailureStatus -Exception $_.Exception
+            $err = $_.Exception.Message
+            $objects = @(); $sidecars = @()
+        }
+    }
+    $sw.Stop()
+    [pscustomobject][ordered]@{
+        area         = $Area
+        cmdlets      = @($Cmdlet)
+        status       = $status
+        count        = @($objects).Count
+        error        = $err
+        durationMs   = [long]$sw.ElapsedMilliseconds
+        diffExcluded = [bool]$DiffExcluded
+        stableKeyProperties = @($StableKeyProperty)
+        sidecars     = @($sidecars)
+        objects      = @($objects)
+    }
+}
+
+function Get-SnapshotProvenance {
+    <# Builds the provenance block (D9): who ran what, with which tool/module/engine
+       versions and parameters, against which tenant, over which UTC window, and how
+       the run ended. Tenant identity comes from Get-ConnectionInformation when the
+       session offers it; volatile token fields are never projected. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [System.Collections.IDictionary]$Parameters = @{},
+        [Parameter(Mandatory)][datetime]$StartedUtc,
+        [Parameter(Mandatory)][datetime]$EndedUtc,
+        [string]$ScriptName = '',
+        [string]$SnapshotLabel = '',
+        [ValidateSet('Completed', 'Aborted')][string]$Outcome = 'Completed'
+    )
+    $params = [ordered]@{}
+    foreach ($k in (@($Parameters.Keys) | Sort-Object)) {
+        $v = $Parameters[$k]
+        if ($v -is [System.Management.Automation.SwitchParameter]) { $params[$k] = [bool]$v }
+        elseif ($v -is [bool] -or $v -is [int] -or $v -is [long] -or $v -is [double]) { $params[$k] = $v }
+        elseif ($v -is [array]) { $params[$k] = @(@($v) | ForEach-Object { "$_" }) }
+        else { $params[$k] = "$v" }
+    }
+    $connections = @()
+    try {
+        if (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue) {
+            foreach ($c in @(Get-ConnectionInformation)) {
+                if ($null -eq $c) { continue }
+                $ci = [ordered]@{}
+                foreach ($n in @('UserPrincipalName', 'TenantID', 'Organization', 'ConnectionUri', 'State', 'IsEopSession')) {
+                    if ($c.PSObject.Properties[$n]) { $ci[$n] = "$($c.$n)" }
+                }
+                $connections += [pscustomobject]$ci
+            }
+        }
+    } catch { }
+    $exoVersion = $null
+    try { $m = @(Get-Module ExchangeOnlineManagement); if (@($m).Count -gt 0) { $exoVersion = "$($m[0].Version)" } } catch { }
+    [pscustomobject][ordered]@{
+        tool              = $script:SnapshotToolName
+        toolVersion       = $script:SnapshotToolVersion
+        script            = $ScriptName
+        userPrincipalName = $UserPrincipalName
+        snapshotLabel     = $SnapshotLabel
+        parameters        = $params
+        connections       = @($connections)
+        moduleVersions    = [pscustomobject][ordered]@{ ExchangeOnlineManagement = $exoVersion }
+        powerShell        = [pscustomobject][ordered]@{ edition = "$($PSVersionTable.PSEdition)"; version = "$($PSVersionTable.PSVersion)" }
+        startedUtc        = $StartedUtc.ToUniversalTime().ToString('o')
+        endedUtc          = $EndedUtc.ToUniversalTime().ToString('o')
+        outcome           = $Outcome
+    }
+}
+
+function Get-PurviewSnapshotDocument {
+    <# Assembles the canonical snapshot document (D9): schemaVersion + provenance +
+       the embedded volatile-field register + the per-area envelopes. This document
+       is the single source of truth; CSVs and reports derive from it. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Provenance,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Areas
+    )
+    [pscustomobject][ordered]@{
+        schemaVersion  = $script:SnapshotSchemaVersion
+        provenance     = $Provenance
+        volatileFields = @($script:VolatileFieldRegister)
+        areas          = @($Areas)
+    }
+}
+
+function ConvertTo-CanonicalSnapshotJson {
+    <# Canonical serialization: -InputObject (never the pipeline, which unwraps
+       1-element arrays) so every collection - including 1-item and 0-item object
+       sets - serializes as a JSON array. Property order is construction order
+       ([ordered] throughout); object order is the stable-key sort. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Document, [int]$Depth = 12)
+    ConvertTo-Json -InputObject $Document -Depth $Depth
+}
+
+function Write-PurviewSnapshot {
+    <# Writes the snapshot as UTF-8 without BOM (D7). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Document, [Parameter(Mandatory)][string]$Path)
+    $json = ConvertTo-CanonicalSnapshotJson -Document $Document
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Write-SnapshotAreaCsvViews {
+    <# Derived per-area CSV views (D9, Task 5d): projected FROM collected snapshot
+       envelopes, never from a second tenant call - the writer only ever sees
+       envelopes. A registered column absent on the live objects emits blank (a
+       caught-later signal for the unverified projections), never an error.
+       Array values flatten to '; '-joined cells. Views are written only for areas
+       that collected objects; snapshot.json remains the source of truth. Returns
+       the written paths. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Areas,
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Columns
+    )
+    $written = [System.Collections.Generic.List[object]]::new()
+    foreach ($a in @($Areas)) {
+        if (-not $Columns.Contains($a.area)) { continue }
+        $objs = @($a.objects)
+        if (@($objs).Count -eq 0) { continue }
+        $cols = @($Columns[$a.area])
+        $rows = @(foreach ($o in $objs) {
+            $row = [ordered]@{}
+            foreach ($c in $cols) {
+                $v = if ($o.PSObject.Properties[$c]) { $o.$c } else { $null }
+                $row[$c] = if ($null -eq $v) { '' }
+                           elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
+                               (@($v) | ForEach-Object { "$_" }) -join '; '
+                           } else { "$v" }
+            }
+            [pscustomobject]$row
+        })
+        if (-not (Test-Path $Directory)) { New-Item -ItemType Directory -Force -Path $Directory | Out-Null }
+        $p = Join-Path $Directory ($a.area + '.csv')
+        $rows | Export-Csv -Path $p -NoTypeInformation -Encoding utf8
+        $written.Add($p)
+    }
+    ,@($written.ToArray())
+}
+
+function Write-SnapshotManifestCsv {
+    <# Human-scannable status view of the envelopes (one row per area). A derived
+       view: snapshot.json remains the source of truth. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Areas,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $rows = @(foreach ($a in @($Areas)) {
+        [pscustomobject][ordered]@{
+            Area       = $a.area
+            Cmdlets    = (@($a.cmdlets) -join '; ')
+            Status     = $a.status
+            Count      = $a.count
+            Error      = $a.error
+            DurationMs = $a.durationMs
+        }
+    })
+    if (@($rows).Count -gt 0) { $rows | Export-Csv -Path $Path -NoTypeInformation -Encoding utf8 }
+}
